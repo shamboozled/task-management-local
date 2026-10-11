@@ -21,7 +21,7 @@ test("notes, task editing, dates, rollover, history and persistence", async ({
   await createCustomer(page);
   const info = page.getByRole("textbox", { name: "Information text" });
   await info.fill("Send proposal 10/10");
-  await info.press("Control+Shift+Enter");
+  await info.press("Control+t");
   const task = page.getByRole("textbox", { name: "Task text" });
   await expect(task).toContainText("Send proposal 10/10");
   await task.press("Enter");
@@ -49,7 +49,7 @@ test("notes, task editing, dates, rollover, history and persistence", async ({
   await page.getByRole("textbox", { name: "Task text" }).press("Enter");
   const other = page.getByRole("textbox", { name: "Information text" }).last();
   await other.fill("Follow up");
-  await other.press("Control+Shift+Enter");
+  await other.press("Control+t");
   await page.getByRole("button", { name: "Current task list" }).click();
   await page
     .getByRole("textbox", { name: "Task text" })
@@ -148,7 +148,7 @@ test("rich paste, image, tables, subpages, backup restore and drag scheduling", 
     .fill("Send report");
   await page
     .getByRole("textbox", { name: "Information text" })
-    .press("Control+Shift+Enter");
+    .press("Control+t");
   await page.getByRole("button", { name: "Current task list" }).click();
   await page.getByLabel("Add date group").fill("2026-10-12");
   await page

@@ -69,7 +69,7 @@ describe("shared notes and task lists", () => {
     expect(tasksOf(db)[0].bullet.dueDate).toMatch(/-10-10$/);
     expect(tasksOf(db)[1].bullet.dueDate).toBeNull();
   });
-  it("assigns information to nearest task parent", () => {
+  it("includes child tasks under their parent and as independent entries", () => {
     let db = fixture();
     db.pages[0].bullets.push(
       { ...newBullet("t"), id: "child", html: "Nested task" },
@@ -80,7 +80,7 @@ describe("shared notes and task lists", () => {
       tasksOf(db)
         .find((t) => t.bullet.id === "t")!
         .information.map((i) => i.bullet.id),
-    ).toEqual(["i"]);
+    ).toEqual(["i", "child", "nestedinfo"]);
     expect(
       tasksOf(db).find((t) => t.bullet.id === "child")!.information[0].bullet
         .id,

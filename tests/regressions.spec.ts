@@ -154,12 +154,24 @@ test("Tab and Shift+Tab preserve the focused line and caret for further typing",
   await line.fill("Child");
   await line.press("End");
   await line.press("Tab");
-  await expect(line).toBeFocused();
+  await expect
+    .poll(() =>
+      line.evaluate((el) =>
+        el.contains(window.getSelection()?.focusNode ?? null),
+      ),
+    )
+    .toBe(true);
   await page.keyboard.type(" nested");
   await expect(line).toHaveText("Child nested");
   await line.press("Home");
   await line.press("Shift+Tab");
-  await expect(line).toBeFocused();
+  await expect
+    .poll(() =>
+      line.evaluate((el) =>
+        el.contains(window.getSelection()?.focusNode ?? null),
+      ),
+    )
+    .toBe(true);
   await page.keyboard.type("Prefix ");
   await expect(line).toHaveText("Prefix Child nested");
   await expect(

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   BookOpen,
   Check,
@@ -21,6 +21,7 @@ import {
   PanelLeftClose,
   Link,
   FolderOpen,
+  ChevronDown,
 } from "lucide-react";
 import {
   type Notebook,
@@ -38,9 +39,36 @@ import {
   todayTitle,
   orderedBullets,
   pagePath,
+  identity,
+  editPage,
+  deleteBullets,
+  descendants,
+  canComplete,
+  removeNavigation,
+  reorderTask,
+  quickDate,
+  textOf,
 } from "./model";
 import { load, save, flush } from "./storage";
-import { sanitize, tableHtml, imageHtml } from "./rich";
+import { sanitize, tableHtml, imageHtml, plainHtml, linkify } from "./rich";
+import {
+  copyBullets,
+  pasteBullets,
+  readBulletClipboard,
+  clipboardHtml,
+  bulletMime,
+} from "./clipboard";
+import {
+  editorAt,
+  currentRange,
+  caretOffset,
+  setCaret,
+  selectedEditors,
+  wholeEditorSelected,
+  splitHtml,
+  isBlank,
+  insertHtml,
+} from "./selection";
 import Editor from "./Editor";
 import SidebarTree from "./SidebarTree";
 const fullDate = (s: string) =>
@@ -63,6 +91,7 @@ function Tool({
       aria-label={label}
       title={label}
       disabled={disabled}
+      contentEditable={false}
       onMouseDown={(e) => e.preventDefault()}
       onClick={onClick}
     >
@@ -93,6 +122,59 @@ export default function App() {
     backupInput = useRef<HTMLInputElement>(null);
   const latest = useRef<Notebook | null>(null);
   latest.current = db;
+  type History = {
+    db: Notebook;
+    view: { type: "page" | "tasks"; id: string } | null;
+    id: string | null;
+    offset: number;
+  };
+  const history = useRef<{
+    past: History[];
+    future: History[];
+    group: string;
+    time: number;
+  }>({ past: [], future: [], group: "", time: 0 });
+  const notesHost = useRef<HTMLDivElement>(null);
+  const pendingDates = useRef(new Set<string>());
+  const previousEnter = useRef<string | null>(null);
+  const pendingFocus = useRef<{ id: string; offset: number | "end" } | null>(
+    null,
+  );
+  const remember = (): History | null =>
+    latest.current
+      ? {
+          db: latest.current,
+          view,
+          id: focusedId.current,
+          offset: editor.current ? caretOffset(editor.current) : 0,
+        }
+      : null;
+  const restoreFocus = () => {
+    const target = pendingFocus.current;
+    if (!target) return;
+    const el = document.querySelector<HTMLDivElement>(
+      `[data-bullet="${target.id}"] .rich-editor`,
+    );
+    if (!el) {
+      pendingFocus.current = null;
+      return;
+    }
+    if (el) {
+      pendingFocus.current = null;
+      focusedId.current = target.id;
+      editor.current = el;
+      setCaret(el, target.offset);
+    }
+  };
+  const focus = (id: string | null, offset: number | "end" = "end") => {
+    if (!id) {
+      pendingFocus.current = null;
+      return;
+    }
+    pendingFocus.current = { id, offset };
+    requestAnimationFrame(restoreFocus);
+  };
+  useLayoutEffect(restoreFocus);
   const [dataLocation, setDataLocation] = useState<{
     database: string;
     backups: string;
@@ -103,7 +185,11 @@ export default function App() {
       .then(setDataLocation)
       .catch(() => {});
     return window.notebookDesktop?.onClose(() => {
-      const state = latest.current;
+      let state = latest.current;
+      if (state)
+        for (const id of pendingDates.current)
+          state = updateBullet(state, id, (b) => editBullet(b, b.html));
+      pendingDates.current.clear();
       Promise.resolve(state ? save(state) : flush())
         .then(() => window.notebookDesktop?.closeReady())
         .catch((e) => {
@@ -151,10 +237,105 @@ export default function App() {
     document.addEventListener("selectionchange", capture);
     return () => document.removeEventListener("selectionchange", capture);
   }, []);
-  const change = (fn: (d: Notebook) => Notebook) =>
-    setDb((d) => (d ? fn(d) : d));
-  const patch = (id: string, fn: (b: Bullet) => Bullet) =>
-    change((d) => updateBullet(d, id, fn));
+  const change = (fn: (d: Notebook) => Notebook, group = "") => {
+    const prior = remember();
+    if (!prior) return;
+    let next: Notebook;
+    try {
+      next = fn(prior.db);
+    } catch (e) {
+      setError((e as Error).message);
+      return;
+    }
+    if (next === prior.db) return;
+    const now = Date.now();
+    if (
+      !group ||
+      history.current.group !== group ||
+      now - history.current.time > 700
+    ) {
+      history.current.past.push(prior);
+      if (history.current.past.length > 100) history.current.past.shift();
+    }
+    history.current.future = [];
+    history.current.group = group;
+    history.current.time = now;
+    latest.current = next;
+    setDb(next);
+  };
+  const undo = (redo = false) => {
+    const current = remember();
+    if (!current) return;
+    const from = redo ? history.current.future : history.current.past;
+    const to = redo ? history.current.past : history.current.future;
+    const prior = from.pop();
+    if (!prior) return;
+    to.push(current);
+    history.current.group = "";
+    pendingDates.current.clear();
+    latest.current = prior.db;
+    setDb(prior.db);
+    if (prior.view) setView(prior.view);
+    focus(prior.id, prior.offset);
+  };
+  useEffect(() => {
+    const key = (e: KeyboardEvent) => {
+      if (dialog || !(e.ctrlKey || e.metaKey)) return;
+      if (e.key.toLowerCase() === "z" || e.key.toLowerCase() === "y") {
+        e.preventDefault();
+        e.stopPropagation();
+        undo(e.shiftKey || e.key.toLowerCase() === "y");
+      }
+    };
+    document.addEventListener("keydown", key, true);
+    return () => document.removeEventListener("keydown", key, true);
+  });
+  const patch = (
+    id: string,
+    fn: (b: Bullet) => Bullet,
+    pageId?: string,
+    group = "",
+  ) => change((d) => updateBullet(d, id, fn, pageId), group);
+  const commit = (id: string, html: string) => {
+    if (!pendingDates.current.has(id)) return;
+    pendingDates.current.delete(id);
+    const state = latest.current;
+    if (!state) return;
+    const source = state.pages
+      .flatMap((p) => p.bullets)
+      .find((b) => b.id === id);
+    if (!source) return;
+    const edited = editBullet(source, html);
+    if (edited.html === source.html && edited.dueDate === source.dueDate)
+      return;
+    const next = updateBullet(state, id, () => edited);
+    latest.current = next;
+    setDb(next);
+  };
+  const editText = (id: string, html: string, pageId?: string) => {
+    if (
+      latest.current?.pages.flatMap((p) => p.bullets).find((b) => b.id === id)
+        ?.html === html
+    )
+      return;
+    pendingDates.current.add(id);
+    patch(id, (b) => ({ ...b, html }), pageId, `text:${id}`);
+  };
+  useEffect(() => {
+    const capture = () => {
+      const el = editorAt(window.getSelection()?.focusNode ?? null);
+      const id = el?.closest<HTMLElement>("[data-bullet]")?.dataset.bullet;
+      if (!el || !id) return;
+      if (focusedId.current && focusedId.current !== id && editor.current)
+        commit(focusedId.current, linkify(sanitize(editor.current.innerHTML)));
+      focusedId.current = id;
+      editor.current = el;
+      const r = currentRange();
+      if (r) selection.current = r.cloneRange();
+    };
+    document.addEventListener("selectionchange", capture);
+    return () => document.removeEventListener("selectionchange", capture);
+  });
   const ask = (
     title: string,
     label: string,
@@ -205,49 +386,30 @@ export default function App() {
     );
   const addBullet = (pageId: string, after?: Bullet) => {
     const bullet = newBullet(after?.parentId ?? null);
-    change((d) => ({
-      ...d,
-      pages: d.pages.map((p) => {
-        if (p.id !== pageId) return p;
+    change((d) =>
+      editPage(d, pageId, (p) => {
         const bullets = [...p.bullets];
-        let index = after
-          ? bullets.findIndex((b) => b.id === after.id) + 1
+        const family = after ? descendants(p, after.id) : [];
+        const index = after
+          ? Math.max(
+              bullets.findIndex((b) => b.id === after.id),
+              ...family.map((b) => bullets.findIndex((x) => x.id === b.id)),
+            ) + 1
           : bullets.length;
-        const descendants = new Set(after ? [after.id] : []);
-        while (
-          index < bullets.length &&
-          descendants.has(bullets[index].parentId ?? "")
-        ) {
-          descendants.add(bullets[index].id);
-          index++;
-        }
         bullets.splice(index, 0, bullet);
         return { ...p, bullets };
       }),
-    }));
-    setTimeout(
-      () =>
-        document
-          .querySelector<HTMLElement>(
-            `[data-bullet="${bullet.id}"] .rich-editor`,
-          )
-          ?.focus(),
-      0,
     );
+    focus(bullet.id, 0);
+    previousEnter.current = null;
   };
   const indent = (pageId: string, b: Bullet, out = false) => {
-    const el = document.querySelector<HTMLElement>(
+    const el = document.querySelector<HTMLDivElement>(
       `[data-bullet="${b.id}"] .rich-editor`,
     );
-    const selected = window.getSelection();
-    const range =
-      el && selected?.rangeCount && el.contains(selected.anchorNode)
-        ? selected.getRangeAt(0).cloneRange()
-        : null;
-    change((d) => ({
-      ...d,
-      pages: d.pages.map((p) => {
-        if (p.id !== pageId) return p;
+    const offset = el ? caretOffset(el) : 0;
+    change((d) =>
+      editPage(d, pageId, (p) => {
         let parentId = b.parentId;
         if (out)
           parentId =
@@ -257,6 +419,7 @@ export default function App() {
           const index = siblings.findIndex((x) => x.id === b.id);
           if (index > 0) parentId = siblings[index - 1].id;
         }
+        if (parentId === b.parentId) return p;
         return {
           ...p,
           bullets: p.bullets.map((x) =>
@@ -264,49 +427,433 @@ export default function App() {
           ),
         };
       }),
-    }));
-    requestAnimationFrame(() => {
-      if (!el?.isConnected) return;
-      el.focus();
-      const current = window.getSelection();
-      if (range && el.contains(range.commonAncestorContainer)) {
-        current?.removeAllRanges();
-        current?.addRange(range);
-      } else {
-        const caret = document.createRange();
-        caret.selectNodeContents(el);
-        caret.collapse(false);
-        current?.removeAllRanges();
-        current?.addRange(caret);
-      }
-    });
+    );
+    if (el) setCaret(el, offset);
   };
   const remove = (pageId: string, b: Bullet) => {
+    const p = latest.current?.pages.find((p) => p.id === pageId);
+    if (!p) return;
+    const ordered = notesHost.current
+      ? [...notesHost.current.querySelectorAll<HTMLDivElement>(".rich-editor")]
+          .filter((el) => el.getClientRects().length)
+          .map((el) => ({
+            bullet: p.bullets.find(
+              (b) =>
+                b.id ===
+                el.closest<HTMLElement>("[data-bullet]")?.dataset.bullet,
+            )!,
+          }))
+          .filter((x) => x.bullet)
+      : orderedBullets(p);
+    const at = ordered.findIndex((x) => x.bullet.id === b.id);
+    const prior = ordered[at - 1]?.bullet.id;
+    let fallback: string | null = prior ?? ordered[at + 1]?.bullet.id ?? null;
+    change((d) => {
+      let next = deleteBullets(d, pageId, [b.id]);
+      if (!next.pages.find((p) => p.id === pageId)!.bullets.length) {
+        const empty = newBullet();
+        fallback = empty.id;
+        next = editPage(next, pageId, (p) => ({ ...p, bullets: [empty] }));
+      }
+      return next;
+    });
+    pendingDates.current.delete(b.id);
+    focus(fallback);
+  };
+  const selectedIds = () => {
+    const host =
+      notesHost.current ?? document.querySelector<HTMLElement>(".task-columns");
+    return host
+      ? selectedEditors(host).map(
+          (el) => el.closest<HTMLElement>("[data-bullet]")!.dataset.bullet!,
+        )
+      : [];
+  };
+  const deleteSelection = (replacement = "") => {
+    const state = latest.current;
+    const p = state?.pages.find((p) => p.id === view?.id);
+    const range = currentRange();
+    const elements = notesHost.current
+      ? selectedEditors(notesHost.current)
+      : [];
+    if (!state || !p || !range || range.collapsed || !elements.length)
+      return false;
+    const ids = elements.map(
+      (el) => el.closest<HTMLElement>("[data-bullet]")!.dataset.bullet!,
+    );
+    if (elements.length === 1 && !wholeEditorSelected(elements[0]))
+      return false;
+    const first = elements[0],
+      last = elements.at(-1)!;
+    const before = document.createElement("div"),
+      after = document.createElement("div");
+    const a = document.createRange();
+    a.selectNodeContents(first);
+    if (first.contains(range.startContainer)) {
+      a.setEnd(range.startContainer, range.startOffset);
+      before.append(a.cloneContents());
+    }
+    const z = document.createRange();
+    z.selectNodeContents(last);
+    if (last.contains(range.endContainer)) {
+      z.setStart(range.endContainer, range.endOffset);
+      after.append(z.cloneContents());
+    }
+    const html = sanitize(
+      before.innerHTML + plainHtml(replacement) + after.innerHTML,
+    );
+    if (isBlank(html)) {
+      const ordered = orderedBullets(p),
+        index = ordered.findIndex((x) => x.bullet.id === ids[0]);
+      let target: string | null = ordered[index - 1]?.bullet.id ?? null;
+      change((d) => {
+        let next = deleteBullets(d, p.id, ids);
+        const updated = next.pages.find((x) => x.id === p.id)!;
+        if (!updated.bullets.length) {
+          const empty = newBullet();
+          target = empty.id;
+          next = editPage(next, p.id, (x) => ({ ...x, bullets: [empty] }));
+        } else target ??= updated.bullets[0].id;
+        return next;
+      });
+      focus(target);
+    } else {
+      change((d) => {
+        const next = deleteBullets(d, p.id, ids.slice(1));
+        return updateBullet(next, ids[0], (b) => editBullet(b, html), p.id);
+      });
+      focus(ids[0], (before.textContent?.length ?? 0) + replacement.length);
+    }
+    return true;
+  };
+  const notesKeys = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    const el =
+      editorAt(window.getSelection()?.focusNode ?? null) ?? editor.current;
+    const id = el?.closest<HTMLElement>("[data-bullet]")?.dataset.bullet;
+    const p = latest.current?.pages.find((p) => p.id === view?.id);
+    const b = p?.bullets.find((b) => b.id === id);
+    if (!el || !b || !p) return;
+    const mod = e.ctrlKey || e.metaKey;
+    if (e.key !== "Enter" || e.shiftKey || mod) previousEnter.current = null;
+    if (mod && e.key.toLowerCase() === "t") {
+      e.preventDefault();
+      const ids = selectedIds();
+      const keys = new Set<string>();
+      change((d) =>
+        (ids.length ? ids : [b.id]).reduce((next, id) => {
+          const bullet = p.bullets.find((b) => b.id === id)!;
+          const key = identity(bullet);
+          if (keys.has(key)) return next;
+          keys.add(key);
+          return updateBullet(next, id, toggleBullet, p.id);
+        }, d),
+      );
+      return;
+    }
+    if (mod && e.key.toLowerCase() === "a") {
+      e.preventDefault();
+      const range = document.createRange();
+      if (wholeEditorSelected(el) || selectedIds().length > 1) {
+        const editors = [
+          ...notesHost.current!.querySelectorAll<HTMLDivElement>(
+            ".rich-editor",
+          ),
+        ].filter((x) => x.getClientRects().length);
+        range.setStart(editors[0], 0);
+        range.setEnd(editors.at(-1)!, editors.at(-1)!.childNodes.length);
+      } else range.selectNodeContents(el);
+      const s = window.getSelection();
+      s?.removeAllRanges();
+      s?.addRange(range);
+      return;
+    }
+    if (e.key === "Tab") {
+      e.preventDefault();
+      indent(p.id, b, e.shiftKey);
+      return;
+    }
+    const range = currentRange();
     if (
-      !confirm(
-        "Delete this bullet and its nested bullets? Historical snapshots will be kept.",
-      )
+      ["Backspace", "Delete"].includes(e.key) &&
+      range &&
+      !range.collapsed &&
+      deleteSelection()
+    ) {
+      e.preventDefault();
+      return;
+    }
+    if (["Backspace", "Delete"].includes(e.key) && isBlank(el.innerHTML)) {
+      e.preventDefault();
+      remove(p.id, b);
+      return;
+    }
+    if (
+      ["Backspace", "Delete"].includes(e.key) &&
+      range?.collapsed &&
+      !el.querySelector("table")
+    ) {
+      const offset = caretOffset(el),
+        length = el.textContent?.length ?? 0;
+      const ordered = orderedBullets(p),
+        index = ordered.findIndex((x) => x.bullet.id === b.id);
+      const other =
+        e.key === "Backspace" && offset === 0
+          ? ordered[index - 1]?.bullet
+          : e.key === "Delete" && offset === length
+            ? ordered[index + 1]?.bullet
+            : undefined;
+      if (other) {
+        e.preventDefault();
+        const keep = e.key === "Backspace" ? other : b,
+          removed = e.key === "Backspace" ? b : other;
+        const caret = textOf(keep.html).length;
+        change((d) =>
+          updateBullet(
+            deleteBullets(d, p.id, [removed.id]),
+            keep.id,
+            (x) => editBullet(x, keep.html + removed.html),
+            p.id,
+          ),
+        );
+        focus(keep.id, caret);
+        return;
+      }
+    }
+    if (["ArrowUp", "ArrowDown"].includes(e.key) && !mod && !e.altKey) {
+      const editors = [
+        ...notesHost.current!.querySelectorAll<HTMLDivElement>(".rich-editor"),
+      ].filter((x) => x.getClientRects().length);
+      const index = editors.indexOf(el),
+        down = e.key === "ArrowDown";
+      const caret = range?.cloneRange();
+      caret?.collapse(!down);
+      const rect = caret?.getClientRects()[0],
+        box = el.getBoundingClientRect();
+      const line = parseFloat(getComputedStyle(el).lineHeight) || 25;
+      const boundary =
+        isBlank(el.innerHTML) ||
+        !rect ||
+        (down
+          ? rect.bottom >= box.bottom - line / 2
+          : rect.top <= box.top + line / 2);
+      const target = editors[index + (down ? 1 : -1)];
+      if (boundary && target) {
+        e.preventDefault();
+        setCaret(
+          target,
+          Math.min(caretOffset(el), target.textContent?.length ?? 0),
+          e.shiftKey,
+        );
+      }
+      return;
+    }
+    if (
+      e.key === "Enter" &&
+      !e.shiftKey &&
+      !mod &&
+      !(
+        window.getSelection()?.anchorNode instanceof Element
+          ? (window.getSelection()!.anchorNode as Element)
+          : window.getSelection()?.anchorNode?.parentElement
+      )?.closest("td,th")
+    ) {
+      e.preventDefault();
+      if (selectedIds().length > 1) {
+        deleteSelection();
+        return;
+      }
+      if (isBlank(el.innerHTML) && previousEnter.current === b.id) {
+        if (b.parentId) indent(p.id, b, true);
+        else {
+          const bullet = newBullet(b.id);
+          change((d) =>
+            editPage(d, p.id, (x) => {
+              const bullets = [...x.bullets];
+              bullets.splice(
+                bullets.findIndex((x) => x.id === b.id) + 1,
+                0,
+                bullet,
+              );
+              return { ...x, bullets };
+            }),
+          );
+          focus(bullet.id, 0);
+          previousEnter.current = bullet.id;
+        }
+        return;
+      }
+      const { before, after } = splitHtml(el);
+      const atStart = isBlank(before) && !isBlank(el.innerHTML);
+      const middle = !atStart && !isBlank(after);
+      const bullet = {
+        ...newBullet(b.parentId),
+        html: middle ? sanitize(after) : "",
+      };
+      change((d) =>
+        editPage(d, p.id, (x) => {
+          let bullets = [...x.bullets];
+          const index = bullets.findIndex((x) => x.id === b.id);
+          if (atStart) bullets.splice(index, 0, bullet);
+          else if (middle) {
+            bullets = bullets.map((x) =>
+              x.id === b.id
+                ? editBullet(x, sanitize(before))
+                : x.parentId === b.id
+                  ? { ...x, parentId: bullet.id }
+                  : x,
+            );
+            bullets.splice(index + 1, 0, bullet);
+          } else {
+            const end =
+              Math.max(
+                index,
+                ...descendants(x, b.id).map((child) =>
+                  bullets.findIndex((x) => x.id === child.id),
+                ),
+              ) + 1;
+            bullets.splice(end, 0, bullet);
+          }
+          return { ...x, bullets };
+        }),
+      );
+      focus(bullet.id, 0);
+      previousEnter.current = bullet.id;
+    }
+  };
+  const notesInput = (e: React.FormEvent<HTMLDivElement>) => {
+    const el =
+      editorAt(window.getSelection()?.focusNode ?? null) ??
+      editorAt(e.target as Node);
+    const id = el?.closest<HTMLElement>("[data-bullet]")?.dataset.bullet;
+    const p = latest.current?.pages.find((p) => p.id === view?.id);
+    const b = p?.bullets.find((b) => b.id === id);
+    if (!el || !id || !b || !p) return;
+    if (isBlank(el.innerHTML) && !isBlank(b.html)) remove(p.id, b);
+    else editText(id, el.innerHTML, p.id);
+  };
+  const clipboardCopy = (
+    e: React.ClipboardEvent<HTMLDivElement>,
+    cut = false,
+  ) => {
+    const state = latest.current,
+      p = state?.pages.find((p) => p.id === view?.id);
+    const els = notesHost.current ? selectedEditors(notesHost.current) : [];
+    const range = currentRange();
+    if (
+      !state ||
+      !p ||
+      !els.length ||
+      (els.length === 1 && !range?.collapsed && !wholeEditorSelected(els[0]))
     )
       return;
-    change((d) => ({
-      ...d,
-      pages: d.pages.map((p) => {
-        if (p.id !== pageId) return p;
-        const removed = new Set([b.id]);
-        let previous = 0;
-        while (previous !== removed.size) {
-          previous = removed.size;
-          p.bullets.forEach((x) => {
-            if (x.parentId && removed.has(x.parentId)) removed.add(x.id);
-          });
+    e.preventDefault();
+    const ids = els.map(
+      (el) => el.closest<HTMLElement>("[data-bullet]")!.dataset.bullet!,
+    );
+    const payload = copyBullets(state, p, ids);
+    e.clipboardData.setData(bulletMime, JSON.stringify(payload));
+    e.clipboardData.setData("text/html", clipboardHtml(payload));
+    e.clipboardData.setData(
+      "text/plain",
+      payload.entries
+        .map((e) => "\t".repeat(e.depth) + "• " + textOf(e.bullet.html))
+        .join("\n"),
+    );
+    if (cut) {
+      let focusId: string | null = null;
+      change((d) => {
+        let next = deleteBullets(d, p.id, ids, true);
+        const updated = next.pages.find((x) => x.id === p.id)!;
+        const prior = orderedBullets(p).findIndex(
+          (x) => x.bullet.id === ids[0],
+        );
+        focusId =
+          orderedBullets(p)
+            .slice(0, prior)
+            .reverse()
+            .find((x) => updated.bullets.some((b) => b.id === x.bullet.id))
+            ?.bullet.id ??
+          updated.bullets[0]?.id ??
+          null;
+        if (!updated.bullets.length) {
+          const empty = newBullet();
+          focusId = empty.id;
+          next = editPage(next, p.id, (x) => ({ ...x, bullets: [empty] }));
         }
-        return { ...p, bullets: p.bullets.filter((x) => !removed.has(x.id)) };
-      }),
-    }));
+        return next;
+      });
+      focus(focusId);
+    }
   };
+  const notesPaste = async (e: React.ClipboardEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    const clipboard = e.clipboardData;
+    const p = latest.current?.pages.find((p) => p.id === view?.id);
+    if (!p) return;
+    const payload = readBulletClipboard(clipboard);
+    try {
+      if (payload) {
+        let id = "";
+        change((d) => {
+          const result = pasteBullets(d, p.id, focusedId.current, payload);
+          id = result.focus;
+          return result.db;
+        });
+        focus(id);
+        return;
+      }
+      let html = "";
+      for (const file of Array.from(clipboard.files))
+        html += await imageHtml(file);
+      if (!html)
+        html = clipboard.getData("text/html")
+          ? sanitize(clipboard.getData("text/html"))
+          : plainHtml(clipboard.getData("text/plain"));
+      const range = currentRange();
+      if (range && selectedIds().length > 1) deleteSelection();
+      if (editor.current) insertHtml(editor.current, html);
+      if (editor.current && focusedId.current)
+        editText(focusedId.current, editor.current.innerHTML, p.id);
+    } catch (error) {
+      setError((error as Error).message);
+    }
+  };
+  useEffect(() => {
+    const host = notesHost.current;
+    if (!host) return;
+    const before = (e: InputEvent) => {
+      if (e.inputType === "historyUndo" || e.inputType === "historyRedo") {
+        e.preventDefault();
+        undo(e.inputType === "historyRedo");
+      } else if (e.inputType === "insertText" && selectedIds().length > 1) {
+        e.preventDefault();
+        deleteSelection(e.data ?? "");
+      } else if (e.inputType.startsWith("delete") && deleteSelection())
+        e.preventDefault();
+    };
+    host.addEventListener("beforeinput", before);
+    return () => host.removeEventListener("beforeinput", before);
+  });
   const focusEditor = (id: string, el: HTMLDivElement) => {
     focusedId.current = id;
     editor.current = el;
+  };
+  const deleteNavigation = (
+    kind: "section" | "subsection" | "page",
+    id: string,
+  ) => {
+    if (
+      !confirm(
+        `Delete this ${kind} and its contained pages? Linked tasks remain in their other locations. You can undo this change.`,
+      )
+    )
+      return;
+    change((d) => {
+      const next = removeNavigation(d, kind, id);
+      if (view?.type === "page" && !next.pages.some((p) => p.id === view.id))
+        setView({ type: "tasks", id: next.activeListId });
+      return next;
+    });
   };
   const insert = (html: string) => {
     if (!editor.current || !focusedId.current) {
@@ -322,8 +869,12 @@ export default function App() {
       s?.removeAllRanges();
       s?.addRange(selection.current);
     }
-    document.execCommand("insertHTML", false, html);
-    patch(focusedId.current, (b) => editBullet(b, editor.current!.innerHTML));
+    insertHtml(editor.current, html, selection.current);
+    editText(
+      focusedId.current,
+      editor.current!.innerHTML,
+      view?.type === "page" ? view.id : undefined,
+    );
   };
   const tableAction = (
     action: "row" | "column" | "removeRow" | "removeColumn",
@@ -357,13 +908,17 @@ export default function App() {
       else Array.from(table.rows).forEach((r) => r.cells[index]?.remove());
     }
     if (focusedId.current)
-      patch(focusedId.current, (b) => editBullet(b, editor.current!.innerHTML));
+      editText(
+        focusedId.current,
+        editor.current!.innerHTML,
+        view?.type === "page" ? view.id : undefined,
+      );
   };
   const exportBackup = async () => {
     if (!db) return;
     try {
       await flush();
-      await window.notebookDesktop?.export(db);
+      await window.notebookDesktop?.export(latest.current!);
     } catch (e) {
       setError("Could not export backup: " + (e as Error).message);
     }
@@ -372,6 +927,7 @@ export default function App() {
     try {
       if (file.size > 100 * 1024 * 1024) throw Error("Backup exceeds 100 MB.");
       const data = validateBackup(JSON.parse(await file.text()));
+      data.notebookId ??= uid();
       data.pages.forEach((p) =>
         p.bullets.forEach((b) => {
           b.html = sanitize(b.html);
@@ -394,6 +950,7 @@ export default function App() {
       await flush();
       await window.notebookDesktop?.backup("restore");
       await save(data);
+      history.current = { past: [], future: [], group: "", time: 0 };
       setDb(data);
       setView({ type: "tasks", id: data.activeListId });
       setError("");
@@ -442,7 +999,49 @@ export default function App() {
   const customer = section
     ? db.customers.find((c) => c.id === section.customerId)
     : undefined;
-  const toggle = (b: Bullet) => patch(b.id, toggleBullet);
+  const toggle = (b: Bullet) => {
+    const ids = selectedIds();
+    const seen = new Set<string>();
+    change((d) =>
+      (ids.length > 1 ? ids : [b.id]).reduce((next, id) => {
+        const source = d.pages
+          .flatMap((p) => p.bullets)
+          .find((b) => b.id === id)!;
+        if (seen.has(identity(source))) return next;
+        seen.add(identity(source));
+        return updateBullet(next, id, toggleBullet, page?.id);
+      }, d),
+    );
+  };
+  const collapsed = new Set(db.ui?.collapsedBullets ?? []);
+  const collapseBullet = (b: Bullet) =>
+    change((d) => ({
+      ...d,
+      ui: {
+        collapsedSections: d.ui?.collapsedSections ?? [],
+        collapsedSubsections: d.ui?.collapsedSubsections ?? [],
+        collapsedBullets: collapsed.has(identity(b))
+          ? [...collapsed].filter((id) => id !== identity(b))
+          : [...collapsed, identity(b)],
+      },
+    }));
+  const hasChildren = (b: Bullet) =>
+    db.pages.some((p) =>
+      p.bullets.some(
+        (x) =>
+          identity(x) === identity(b) &&
+          p.bullets.some((child) => child.parentId === x.id),
+      ),
+    ) ||
+    allTasks.some(
+      (t) =>
+        (identity(t.bullet) === identity(b) && t.information.length > 0) ||
+        t.information.some(
+          (i, n) =>
+            identity(i.bullet) === identity(b) &&
+            (t.information[n + 1]?.depth ?? -1) > i.depth,
+        ),
+    );
   const selectedCell = () => {
     const anchor = window.getSelection()?.anchorNode;
     return (
@@ -454,9 +1053,73 @@ export default function App() {
     e: React.KeyboardEvent<HTMLDivElement>,
     pageId?: string,
   ) => {
-    if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key === "Enter") {
+    if (readOnly) return;
+    if (["Backspace", "Delete"].includes(e.key) && !pageId) {
+      const range = currentRange();
+      if (
+        (range &&
+          !range.collapsed &&
+          (selectedIds().length > 1 || wholeEditorSelected(e.currentTarget))) ||
+        isBlank(e.currentTarget.innerHTML)
+      ) {
+        e.preventDefault();
+        removeTaskSelection();
+        return;
+      }
+    }
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "t") {
       e.preventDefault();
       toggle(b);
+    } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "a") {
+      e.preventDefault();
+      const el = e.currentTarget;
+      const range = document.createRange();
+      if (wholeEditorSelected(el) || selectedIds().length > 1) {
+        const editors = [
+          ...document.querySelectorAll<HTMLDivElement>(
+            ".task-columns .rich-editor",
+          ),
+        ];
+        range.setStart(editors[0], 0);
+        range.setEnd(editors.at(-1)!, editors.at(-1)!.childNodes.length);
+      } else range.selectNodeContents(el);
+      const s = window.getSelection();
+      s?.removeAllRanges();
+      s?.addRange(range);
+    } else if (
+      ["ArrowUp", "ArrowDown"].includes(e.key) &&
+      !e.ctrlKey &&
+      !e.metaKey &&
+      !e.altKey
+    ) {
+      const el = e.currentTarget;
+      const editors = [
+        ...document.querySelectorAll<HTMLDivElement>(
+          ".task-columns .rich-editor",
+        ),
+      ];
+      const index = editors.indexOf(el),
+        down = e.key === "ArrowDown";
+      const r = currentRange()?.cloneRange();
+      r?.collapse(!down);
+      const rect = r?.getClientRects()[0],
+        box = el.getBoundingClientRect();
+      const line = parseFloat(getComputedStyle(el).lineHeight) || 25;
+      const boundary =
+        isBlank(el.innerHTML) ||
+        !rect ||
+        (down
+          ? rect.bottom >= box.bottom - line / 2
+          : rect.top <= box.top + line / 2);
+      const target = editors[index + (down ? 1 : -1)];
+      if (boundary && target) {
+        e.preventDefault();
+        setCaret(
+          target,
+          Math.min(caretOffset(el), target.textContent?.length ?? 0),
+          e.shiftKey,
+        );
+      }
     } else if (
       pageId &&
       e.key === "Enter" &&
@@ -472,25 +1135,50 @@ export default function App() {
       indent(pageId, b, e.shiftKey);
     }
   };
-  const renderBullet = (b: Bullet, pageId?: string) => (
+  const renderBullet = (b: Bullet, pageId?: string, inherited = false) => (
     <div
       className={`bullet-row ${b.completed ? "completed" : ""}`}
       key={b.id}
       data-bullet={b.id}
     >
+      {b.kind === "task" && hasChildren(b) && (
+        <button
+          contentEditable={false}
+          className="bullet-collapse"
+          aria-label={
+            collapsed.has(identity(b))
+              ? "Expand task children"
+              : "Collapse task children"
+          }
+          aria-expanded={!collapsed.has(identity(b))}
+          onClick={() => collapseBullet(b)}
+        >
+          {collapsed.has(identity(b)) ? (
+            <ChevronRight size={14} />
+          ) : (
+            <ChevronDown size={14} />
+          )}
+        </button>
+      )}
       {b.kind === "task" ? (
         <input
           className="task-check"
           aria-label="Complete task"
           type="checkbox"
           checked={b.completed}
-          disabled={readOnly}
+          contentEditable={false}
+          disabled={readOnly || (!b.completed && !canComplete(db, b))}
+          title={
+            !b.completed && !canComplete(db, b)
+              ? "Complete child tasks first"
+              : "Complete task"
+          }
           onChange={(e) =>
-            patch(b.id, (x) => ({ ...x, completed: e.target.checked }))
+            patch(b.id, (x) => ({ ...x, completed: e.target.checked }), pageId)
           }
         />
       ) : (
-        <span className="info-dot" title="Information">
+        <span className="info-dot" title="Information" contentEditable={false}>
           •
         </span>
       )}
@@ -498,14 +1186,25 @@ export default function App() {
         html={b.html}
         label={b.kind === "task" ? "Task text" : "Information text"}
         readOnly={readOnly}
+        inherited={inherited}
         onChange={(html) => {
-          if (!readOnly) patch(b.id, (x) => editBullet(x, html));
+          if (!readOnly && !inherited) {
+            if (isBlank(html) && !isBlank(b.html)) {
+              const source = db.pages.find((p) =>
+                p.bullets.some((x) => x.id === b.id),
+              );
+              if (source) remove(source.id, b);
+            } else editText(b.id, html, pageId);
+          }
+        }}
+        onCommit={(html) => {
+          if (!readOnly) commit(b.id, html);
         }}
         onFocus={(el) => focusEditor(b.id, el)}
         onKey={(e) => keys(b, e, pageId)}
       />
       {!readOnly && (
-        <div className="bullet-actions">
+        <div className="bullet-actions" contentEditable={false}>
           <Tool
             label={
               b.kind === "task" ? "Convert to information" : "Convert to task"
@@ -536,27 +1235,61 @@ export default function App() {
   );
   const renderNotes = () =>
     page &&
-    orderedBullets(page).map(({ bullet, depth }) => (
-      <div
-        key={bullet.id}
-        className="note-node"
-        style={{ marginLeft: depth * 24 }}
-      >
-        {renderBullet(bullet, page.id)}
-      </div>
-    ));
+    orderedBullets(page)
+      .filter(({ bullet }) => {
+        let parent = bullet.parentId;
+        while (parent) {
+          const b = page.bullets.find((b) => b.id === parent)!;
+          if (collapsed.has(identity(b))) return false;
+          parent = b.parentId;
+        }
+        return true;
+      })
+      .map(({ bullet, depth }) => (
+        <div
+          key={bullet.id}
+          className="note-node"
+          style={{ marginLeft: depth * 24 }}
+        >
+          {renderBullet(bullet, page.id, true)}
+        </div>
+      ));
   const taskCard = (task: Task) => (
     <article
       key={task.bullet.id}
       className="task-card"
       data-task={task.bullet.id}
+      onDragOver={(e) => {
+        if (!readOnly) {
+          e.preventDefault();
+          e.stopPropagation();
+        }
+      }}
+      onDrop={(e) => {
+        if (readOnly) return;
+        e.preventDefault();
+        e.stopPropagation();
+        const id = e.dataTransfer.getData("text/plain");
+        const source = tasksOf(db).find((t) => identity(t.bullet) === id);
+        if (!source) return;
+        change((d) =>
+          reorderTask(
+            updateBullet(d, id, (b) => moveDate(b, task.bullet.dueDate)),
+            id,
+            identity(task.bullet),
+            e.clientY >
+              e.currentTarget.getBoundingClientRect().top +
+                e.currentTarget.getBoundingClientRect().height / 2,
+          ),
+        );
+      }}
     >
       <div className="task-source">
         {!readOnly && (
           <span
             draggable
             onDragStart={(e) =>
-              e.dataTransfer.setData("text/plain", task.bullet.id)
+              e.dataTransfer.setData("text/plain", identity(task.bullet))
             }
             className="drag-handle"
             title="Drag to a date group or Unassigned"
@@ -566,6 +1299,12 @@ export default function App() {
         )}
         <span>{task.customerName}</span>
         <button
+          disabled={!db.pages.some((p) => p.id === task.pageId)}
+          title={
+            !db.pages.some((p) => p.id === task.pageId)
+              ? "This source page was deleted; the historical snapshot is preserved."
+              : "Open source page"
+          }
           onClick={() => {
             setView({ type: "page", id: task.pageId });
             setQuery("");
@@ -585,17 +1324,46 @@ export default function App() {
         </button>
       </div>
       {renderBullet(task.bullet)}
-      {task.information.length > 0 && (
+      {task.information.length > 0 && !collapsed.has(identity(task.bullet)) && (
         <div className="attached-info">
-          {task.information.map((i) => (
-            <div key={i.bullet.id} style={{ marginLeft: i.depth * 18 }}>
-              {renderBullet(i.bullet)}
-            </div>
-          ))}
+          {task.information
+            .filter((i, index) => {
+              for (let n = index - 1, level = i.depth; n >= 0; n--) {
+                const ancestor = task.information[n];
+                if (ancestor.depth < level) {
+                  if (collapsed.has(identity(ancestor.bullet))) return false;
+                  level = ancestor.depth;
+                }
+              }
+              return true;
+            })
+            .map((i) => (
+              <div key={i.bullet.id} style={{ marginLeft: i.depth * 18 }}>
+                {renderBullet(i.bullet)}
+              </div>
+            ))}
         </div>
       )}
       {!readOnly && (
         <div className="schedule-control">
+          <div className="quick-dates">
+            {(
+              [
+                ["today", "Today"],
+                ["tomorrow", "Tomorrow"],
+                ["eow", "EOW"],
+              ] as const
+            ).map(([which, label]) => (
+              <button
+                key={which}
+                onClick={() =>
+                  patch(task.bullet.id, (b) => moveDate(b, quickDate(which)))
+                }
+              >
+                {label}
+              </button>
+            ))}
+          </div>
           <label>
             Due date
             <input
@@ -624,8 +1392,81 @@ export default function App() {
     e.preventDefault();
     if (readOnly) return;
     const id = e.dataTransfer.getData("text/plain");
-    if (!tasksOf(db).some((t) => t.bullet.id === id)) return;
+    if (!tasksOf(db).some((t) => identity(t.bullet) === id)) return;
     patch(id, (b) => moveDate(b, date));
+  };
+  const taskSelectionGroups = (els: HTMLDivElement[]) => {
+    const groups = new Map<string, Set<string>>();
+    for (const el of els) {
+      const id = el.closest<HTMLElement>("[data-bullet]")!.dataset.bullet!;
+      const source = db.pages.find((p) => p.bullets.some((b) => b.id === id));
+      if (!source) continue;
+      const ids = groups.get(source.id) ?? new Set<string>();
+      ids.add(id);
+      groups.set(source.id, ids);
+    }
+    return groups;
+  };
+  const removeTaskSelection = (
+    groups?: Map<string, Set<string>>,
+    cut = false,
+  ) => {
+    const host = document.querySelector<HTMLElement>(".task-columns");
+    if (!host || readOnly) return;
+    const selected = groups ?? taskSelectionGroups(selectedEditors(host));
+    let nextFocus: string | null = null;
+    change((d) => {
+      let next = d;
+      for (const [pageId, ids] of selected) {
+        next = deleteBullets(next, pageId, [...ids], cut);
+        if (!next.pages.find((p) => p.id === pageId)!.bullets.length)
+          next = editPage(next, pageId, (p) => ({
+            ...p,
+            bullets: [newBullet()],
+          }));
+      }
+      nextFocus = tasksOf(next)[0]?.bullet.id ?? null;
+      return next;
+    });
+    focus(nextFocus);
+  };
+  const copyTaskSelection = (
+    e: React.ClipboardEvent<HTMLDivElement>,
+    cut = false,
+  ) => {
+    if (readOnly) return;
+    const els = selectedEditors(e.currentTarget),
+      range = currentRange();
+    if (
+      !els.length ||
+      (els.length === 1 && !range?.collapsed && !wholeEditorSelected(els[0]))
+    )
+      return;
+    const groups = taskSelectionGroups(els);
+    const payload = {
+      format: "task-notebook/bullets" as const,
+      version: 1 as const,
+      notebookId: db.notebookId,
+      entries: [...groups].flatMap(
+        ([id, ids]) =>
+          copyBullets(
+            db,
+            db.pages.find((p) => p.id === id)!,
+            [...ids],
+          ).entries,
+      ),
+    };
+    if (!payload.entries.length) return;
+    e.preventDefault();
+    e.clipboardData.setData(bulletMime, JSON.stringify(payload));
+    e.clipboardData.setData("text/html", clipboardHtml(payload));
+    e.clipboardData.setData(
+      "text/plain",
+      payload.entries
+        .map((e) => "\t".repeat(e.depth) + "• " + textOf(e.bullet.html))
+        .join("\n"),
+    );
+    if (cut) removeTaskSelection(groups, true);
   };
   return (
     <div className={`app ${sidebar ? "" : "sidebar-hidden"}`}>
@@ -663,6 +1504,7 @@ export default function App() {
           change={change}
           ask={ask}
           createPage={createPage}
+          remove={deleteNavigation}
           openPage={(id) => {
             setView({ type: "page", id });
             setQuery("");
@@ -820,7 +1662,7 @@ export default function App() {
                         todayTitle(),
                         (title) => {
                           const next = rollover(db, title);
-                          setDb(next);
+                          change(() => next);
                           setView({ type: "tasks", id: next.activeListId });
                           setExtraDates([]);
                         },
@@ -926,17 +1768,41 @@ export default function App() {
                 </Tool>
                 <span className="toolbar-font">Calibri · 12 pt</span>
               </div>
-              <div className="notes-sheet">
+              <div
+                className="notes-sheet"
+                ref={notesHost}
+                contentEditable
+                suppressContentEditableWarning
+                tabIndex={0}
+                role="textbox"
+                aria-label="Notes page"
+                aria-multiline="true"
+                onKeyDown={notesKeys}
+                onInput={notesInput}
+                onCopy={(e) => clipboardCopy(e)}
+                onCut={(e) => clipboardCopy(e, true)}
+                onPaste={notesPaste}
+                onBlur={() => {
+                  if (focusedId.current && editor.current)
+                    commit(
+                      focusedId.current,
+                      linkify(sanitize(editor.current.innerHTML)),
+                    );
+                }}
+              >
                 {renderNotes()}
-                <button className="add-note" onClick={() => addBullet(page.id)}>
+                <button
+                  className="add-note"
+                  contentEditable={false}
+                  onClick={() => addBullet(page.id)}
+                >
                   <Plus size={16} />
                   Add information bullet
                 </button>
               </div>
               <div className="editor-help">
                 <span>
-                  <kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>Enter</kbd> toggle
-                  task
+                  <kbd>Ctrl</kbd> + <kbd>T</kbd> toggle task
                 </span>
                 <span>
                   <kbd>Tab</kbd> indent · <kbd>Shift Tab</kbd> outdent
@@ -987,7 +1853,11 @@ export default function App() {
                   source notes will not change this page.
                 </div>
               )}
-              <div className="task-columns">
+              <div
+                className="task-columns"
+                onCopy={(e) => copyTaskSelection(e)}
+                onCut={(e) => copyTaskSelection(e, true)}
+              >
                 <section
                   className="task-column"
                   onDragOver={(e) => e.preventDefault()}

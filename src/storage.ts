@@ -1,4 +1,4 @@
-import { emptyNotebook, validateBackup, type Notebook } from "./model";
+import { emptyNotebook, validateBackup, uid, type Notebook } from "./model";
 let queue: Promise<void> = Promise.resolve();
 export async function load() {
   if (!window.notebookDesktop)
@@ -6,7 +6,9 @@ export async function load() {
       "Open this app with the desktop executable or npm start. Browser storage is not used.",
     );
   const saved = await window.notebookDesktop.load();
-  return saved ? validateBackup(saved) : emptyNotebook();
+  const state = saved ? validateBackup(saved) : emptyNotebook();
+  state.notebookId ??= uid();
+  return state;
 }
 export function save(state: Notebook) {
   queue = queue

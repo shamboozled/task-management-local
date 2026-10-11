@@ -5,6 +5,8 @@ export type Bullet = {
   html: string;
   completed: boolean;
   dueDate: string | null;
+  sharedId?: string;
+  lastEditedPageId?: string;
 };
 export type Page = {
   id: string;
@@ -36,7 +38,12 @@ export type Notebook = {
   pages: Page[];
   taskLists: TaskList[];
   activeListId: string;
-  ui?: { collapsedSections: string[]; collapsedSubsections: string[] };
+  notebookId?: string;
+  ui?: {
+    collapsedSections: string[];
+    collapsedSubsections: string[];
+    collapsedBullets?: string[];
+  };
 };
 export const todayTitle = (date = new Date()) =>
   `${String(date.getMonth() + 1).padStart(2, "0")}/${String(date.getDate()).padStart(2, "0")}/${date.getFullYear()}`;
@@ -53,6 +60,7 @@ export function emptyNotebook(): Notebook {
   const id = uid();
   return {
     version: 1,
+    notebookId: uid(),
     customers: [],
     sections: [],
     pages: [],
@@ -150,65 +158,127 @@ export function moveDate(
   return { ...b, html: el.innerHTML, dueDate: date };
 }
 export function tasksOf(db: Notebook): Task[] {
-  return db.pages.flatMap((page) =>
-    page.bullets
-      .filter(
-        (b) =>
-          b.kind === "task" &&
-          db.taskLists
-            .find((l) => l.id === db.activeListId)!
-            .taskIds.includes(b.id),
-      )
-      .map((bullet) => {
-        const section = db.sections.find((s) => s.id === page.sectionId);
-        const customerName =
-          db.customers.find((c) => c.id === section?.customerId)?.name ?? "";
-        const information: Task["information"] = [];
-        function walk(parent: string, depth: number) {
-          for (const b of page.bullets.filter((x) => x.parentId === parent)) {
-            if (b.kind === "task") continue;
-            information.push({ bullet: b, depth });
-            walk(b.id, depth + 1);
+  const active = db.taskLists.find((l) => l.id === db.activeListId)!;
+  const seen = new Set<string>();
+  return db.pages
+    .flatMap((page) =>
+      page.bullets
+        .filter((b) => {
+          const include =
+            b.kind === "task" &&
+            active.taskIds.includes(identity(b)) &&
+            !seen.has(identity(b)) &&
+            (!b.lastEditedPageId ||
+              !db.pages.some(
+                (p) =>
+                  p.id === b.lastEditedPageId &&
+                  p.bullets.some((x) => identity(x) === identity(b)),
+              ) ||
+              page.id === b.lastEditedPageId);
+          if (include) seen.add(identity(b));
+          return include;
+        })
+        .map((bullet) => {
+          const section = db.sections.find((s) => s.id === page.sectionId);
+          const customerName =
+            db.customers.find((c) => c.id === section?.customerId)?.name ?? "";
+          const information: Task["information"] = [];
+          function walk(parent: string, depth: number) {
+            for (const b of page.bullets.filter((x) => x.parentId === parent)) {
+              information.push({ bullet: b, depth });
+              walk(b.id, depth + 1);
+            }
           }
-        }
-        walk(bullet.id, 0);
-        return {
-          bullet,
-          pageId: page.id,
-          pageTitle: page.title,
-          customerName,
-          information,
-        };
-      }),
-  );
+          walk(bullet.id, 0);
+          return {
+            bullet,
+            pageId: page.id,
+            pageTitle: page.title,
+            customerName,
+            information,
+          };
+        }),
+    )
+    .sort(
+      (a, b) =>
+        active.taskIds.indexOf(identity(a.bullet)) -
+        active.taskIds.indexOf(identity(b.bullet)),
+    );
 }
+export const identity = (b: Bullet) => b.sharedId ?? b.id;
 export function updateBullet(
   db: Notebook,
   id: string,
   fn: (b: Bullet) => Bullet,
+  pageId?: string,
 ): Notebook {
+  const source = db.pages
+    .flatMap((p) => p.bullets)
+    .find((b) => b.id === id || identity(b) === id);
+  if (!source) return db;
+  const key = identity(source);
+  const next = fn(source);
+  if (next.completed && !source.completed && !canComplete(db, source))
+    return db;
+  const ancestors = new Set<string>();
+  for (const page of db.pages)
+    for (const placement of page.bullets.filter((b) => identity(b) === key)) {
+      let parent = placement.parentId;
+      while (parent) {
+        const b = page.bullets.find((b) => b.id === parent);
+        if (!b) break;
+        if (b.kind === "task") ancestors.add(identity(b));
+        parent = b.parentId;
+      }
+    }
+  const reopened = new Set<string>();
   let add = false;
   const pages = db.pages.map((p) => ({
     ...p,
     bullets: p.bullets.map((b) => {
-      if (b.id !== id) return b;
-      const next = fn(b);
+      if (identity(b) !== key) {
+        if (!ancestors.has(identity(b))) return b;
+        const reopen = next.kind === "task" && !next.completed && b.completed;
+        if (reopen) reopened.add(identity(b));
+        return {
+          ...b,
+          lastEditedPageId: pageId ?? b.lastEditedPageId,
+          completed: reopen ? false : b.completed,
+        };
+      }
       add =
         next.kind === "task" &&
         (b.kind !== "task" || (b.completed && !next.completed));
-      return next;
+      return {
+        ...b,
+        html: next.html,
+        kind: next.kind,
+        completed: next.completed,
+        dueDate: next.dueDate,
+        lastEditedPageId: pageId ?? next.lastEditedPageId,
+      };
     }),
   }));
   return {
     ...db,
     pages,
-    taskLists: add
-      ? db.taskLists.map((l) =>
-          l.id === db.activeListId
-            ? { ...l, taskIds: [...new Set([...l.taskIds, id])] }
-            : l,
-        )
-      : db.taskLists,
+    taskLists:
+      add || reopened.size
+        ? db.taskLists.map((l) =>
+            l.id === db.activeListId
+              ? {
+                  ...l,
+                  taskIds: [
+                    ...new Set([
+                      ...l.taskIds,
+                      ...(add ? [key] : []),
+                      ...reopened,
+                    ]),
+                  ],
+                }
+              : l,
+          )
+        : db.taskLists,
   };
 }
 export function rollover(db: Notebook, title: string): Notebook {
@@ -229,7 +299,7 @@ export function rollover(db: Notebook, title: string): Notebook {
         snapshot: null,
         taskIds: tasksOf(db)
           .filter((t) => !t.bullet.completed)
-          .map((t) => t.bullet.id),
+          .map((t) => identity(t.bullet)),
       },
     ],
   };
@@ -260,9 +330,13 @@ export function validateBackup(value: unknown): Notebook {
     d.ui &&
     (!Array.isArray(d.ui.collapsedSections) ||
       !Array.isArray(d.ui.collapsedSubsections) ||
-      [...d.ui.collapsedSections, ...d.ui.collapsedSubsections].some(
-        (id) => typeof id !== "string",
-      ))
+      (d.ui.collapsedBullets !== undefined &&
+        !Array.isArray(d.ui.collapsedBullets)) ||
+      [
+        ...d.ui.collapsedSections,
+        ...d.ui.collapsedSubsections,
+        ...(d.ui.collapsedBullets ?? []),
+      ].some((id) => typeof id !== "string"))
   )
     throw Error("Invalid sidebar settings.");
   const ids = new Set<string>();
@@ -279,6 +353,9 @@ export function validateBackup(value: unknown): Notebook {
       typeof b.html !== "string" ||
       typeof b.completed !== "boolean" ||
       !(b.parentId === null || typeof b.parentId === "string") ||
+      (b.sharedId !== undefined && typeof b.sharedId !== "string") ||
+      (b.lastEditedPageId !== undefined &&
+        typeof b.lastEditedPageId !== "string") ||
       !(
         b.dueDate === null ||
         (typeof b.dueDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(b.dueDate))
@@ -320,6 +397,14 @@ export function validateBackup(value: unknown): Notebook {
         const found = p.bullets.find((x) => x.id === parent);
         if (!found) throw Error("Missing parent bullet.");
         parent = found.parentId;
+      }
+      const ancestors = new Set([identity(b)]);
+      let ancestor = p.bullets.find((x) => x.id === b.parentId);
+      while (ancestor) {
+        if (ancestors.has(identity(ancestor)))
+          throw Error("Cyclic shared bullets.");
+        ancestors.add(identity(ancestor));
+        ancestor = p.bullets.find((x) => x.id === ancestor!.parentId);
       }
     }
   });
@@ -438,4 +523,290 @@ export function pagePath(db: Notebook, page: Page): Page[] {
     parent = found.parentId;
   }
   return path;
+}
+
+export function descendants(page: Page, id: string): Bullet[] {
+  const out: Bullet[] = [];
+  const walk = (parent: string) =>
+    page.bullets
+      .filter((b) => b.parentId === parent)
+      .forEach((b) => {
+        out.push(b);
+        walk(b.id);
+      });
+  walk(id);
+  return out;
+}
+export function canComplete(db: Notebook, bullet: Bullet): boolean {
+  return !db.pages.some((p) =>
+    p.bullets.some(
+      (b) =>
+        identity(b) === identity(bullet) &&
+        descendants(p, b.id).some(
+          (child) => child.kind === "task" && !child.completed,
+        ),
+    ),
+  );
+}
+
+// Each placement has a unique ID. Linked placements share content identity; page
+// edits also mirror the full child tree, preserving existing placement IDs.
+export function editPage(
+  db: Notebook,
+  pageId: string,
+  fn: (p: Page) => Page,
+): Notebook {
+  const before = db.pages.find((p) => p.id === pageId);
+  let next = {
+    ...db,
+    pages: db.pages.map((p) => (p.id === pageId ? fn(p) : p)),
+  };
+  const source = next.pages.find((p) => p.id === pageId);
+  if (!source) return next;
+  if (source === before) return db;
+  for (const b of source.bullets) {
+    const seen = new Set([identity(b)]);
+    let parent = b.parentId;
+    while (parent) {
+      const ancestor = source.bullets.find((x) => x.id === parent);
+      if (!ancestor) throw Error("Missing parent bullet.");
+      if (seen.has(identity(ancestor)))
+        throw Error("Linked tasks cannot be nested inside themselves.");
+      seen.add(identity(ancestor));
+      parent = ancestor.parentId;
+    }
+  }
+  const signature = (p: Page, root: Bullet) =>
+    JSON.stringify(
+      [root, ...descendants(p, root.id)].map((b) => [
+        identity(b),
+        b.id === root.id
+          ? null
+          : identity(p.bullets.find((x) => x.id === b.parentId)!),
+        b.html,
+        b.kind,
+        b.completed,
+        b.dueDate,
+      ]),
+    );
+  const roots = orderedBullets(source)
+    .map((x) => x.bullet)
+    .filter((b) => {
+      const prior = before?.bullets.find((x) => x.id === b.id);
+      return !prior || signature(before!, prior) !== signature(source, b);
+    })
+    .reverse();
+  const synchronized = new Set<string>();
+  for (const root of roots) {
+    if (synchronized.has(identity(root))) continue;
+    synchronized.add(identity(root));
+    const children = descendants(source, root.id);
+    next = {
+      ...next,
+      pages: next.pages.map((p) => {
+        // Snapshot targets before replacement: a page may contain multiple linked placements.
+        const targets = p.bullets.filter(
+          (b) => identity(b) === identity(root) && b.id !== root.id,
+        );
+        let bullets = p.bullets;
+        for (const target of targets) {
+          const prior = descendants({ ...p, bullets }, target.id);
+          const mapping = new Map<string, string>([[root.id, target.id]]);
+          const used = new Set<string>();
+          const copies = children.map((b) => {
+            const old = prior.find(
+              (x) => identity(x) === identity(b) && !used.has(x.id),
+            );
+            const id = old?.id ?? uid();
+            used.add(id);
+            mapping.set(b.id, id);
+            return {
+              ...b,
+              id,
+              sharedId: identity(b),
+              parentId: mapping.get(b.parentId!)!,
+            };
+          });
+          const removed = new Set(prior.map((b) => b.id));
+          const at = bullets.findIndex((b) => b.id === target.id);
+          bullets = bullets.filter((b) => !removed.has(b.id));
+          const index = bullets.findIndex((b) => b.id === target.id);
+          if (at < 0 || index < 0) continue;
+          bullets[index] = {
+            ...target,
+            html: root.html,
+            kind: root.kind,
+            completed: root.completed,
+            dueDate: root.dueDate,
+            lastEditedPageId: root.lastEditedPageId,
+          };
+          bullets.splice(index + 1, 0, ...copies);
+        }
+        return { ...p, bullets };
+      }),
+    };
+  }
+  const activeIds = new Set(
+    next.taskLists.find((l) => l.id === next.activeListId)!.taskIds,
+  );
+  const blocked = new Set(
+    next.pages
+      .flatMap((p) => p.bullets)
+      .filter((b) => b.kind === "task" && b.completed && !canComplete(next, b))
+      .map(identity),
+  );
+  if (blocked.size) {
+    next.pages = next.pages.map((p) => ({
+      ...p,
+      bullets: p.bullets.map((b) =>
+        blocked.has(identity(b)) ? { ...b, completed: false } : b,
+      ),
+    }));
+    blocked.forEach((id) => activeIds.add(id));
+  }
+  // A newly inserted/conversion task joins the current list; excluded completed
+  // historical tasks do not rejoin merely because their page was edited.
+  const oldTaskKeys = new Set(
+    db.pages
+      .flatMap((p) => p.bullets)
+      .filter((b) => b.kind === "task")
+      .map(identity),
+  );
+  next.pages
+    .flatMap((p) => p.bullets)
+    .filter((b) => b.kind === "task" && !oldTaskKeys.has(identity(b)))
+    .forEach((b) => activeIds.add(identity(b)));
+  next.taskLists = next.taskLists.map((l) =>
+    l.id === next.activeListId ? { ...l, taskIds: [...activeIds] } : l,
+  );
+  return next;
+}
+
+export function deleteBullets(
+  db: Notebook,
+  pageId: string,
+  ids: string[],
+  includeChildren = false,
+): Notebook {
+  return editPage(db, pageId, (p) => {
+    const removed = new Set(ids);
+    if (includeChildren)
+      ids.forEach((id) => descendants(p, id).forEach((b) => removed.add(b.id)));
+    const parentOf = (b: Bullet): string | null => {
+      let parent = b.parentId;
+      while (parent && removed.has(parent))
+        parent = p.bullets.find((x) => x.id === parent)?.parentId ?? null;
+      return parent;
+    };
+    return {
+      ...p,
+      bullets: p.bullets
+        .filter((b) => !removed.has(b.id))
+        .map((b) => ({ ...b, parentId: parentOf(b) })),
+    };
+  });
+}
+
+export function removeNavigation(
+  db: Notebook,
+  kind: "section" | "subsection" | "page",
+  id: string,
+): Notebook {
+  const subsections = new Set(
+    kind === "section"
+      ? db.sections.filter((s) => s.customerId === id).map((s) => s.id)
+      : kind === "subsection"
+        ? [id]
+        : [],
+  );
+  const pages = new Set(
+    kind === "page"
+      ? [id]
+      : db.pages.filter((p) => subsections.has(p.sectionId)).map((p) => p.id),
+  );
+  let count = -1;
+  while (count !== pages.size) {
+    count = pages.size;
+    db.pages
+      .filter((p) => p.parentId && pages.has(p.parentId))
+      .forEach((p) => pages.add(p.id));
+  }
+  return {
+    ...db,
+    customers:
+      kind === "section"
+        ? db.customers.filter((c) => c.id !== id)
+        : db.customers,
+    sections: db.sections.filter((s) => !subsections.has(s.id)),
+    pages: db.pages.filter((p) => !pages.has(p.id)),
+  };
+}
+
+export function movePage(
+  db: Notebook,
+  id: string,
+  sectionId: string,
+  parentId: string | null,
+  beforeId: string | null = null,
+): Notebook {
+  const page = db.pages.find((p) => p.id === id);
+  if (!page || id === beforeId || !db.sections.some((s) => s.id === sectionId))
+    return db;
+  const family = new Set([id]);
+  let size = -1;
+  while (size !== family.size) {
+    size = family.size;
+    db.pages
+      .filter((p) => p.parentId && family.has(p.parentId))
+      .forEach((p) => family.add(p.id));
+  }
+  if (parentId && family.has(parentId)) return db;
+  if (
+    parentId &&
+    !db.pages.some((p) => p.id === parentId && p.sectionId === sectionId)
+  )
+    return db;
+  const pages = db.pages
+    .filter((p) => p.id !== id)
+    .map((p) => (family.has(p.id) ? { ...p, sectionId } : p));
+  const index = beforeId
+    ? pages.findIndex((p) => p.id === beforeId)
+    : pages.length;
+  if (index < 0) return db;
+  pages.splice(index, 0, { ...page, sectionId, parentId });
+  return { ...db, pages };
+}
+
+export function reorderTask(
+  db: Notebook,
+  id: string,
+  before: string,
+  after = false,
+): Notebook {
+  if (id === before) return db;
+  return {
+    ...db,
+    taskLists: db.taskLists.map((l) => {
+      if (
+        l.id !== db.activeListId ||
+        !l.taskIds.includes(id) ||
+        !l.taskIds.includes(before)
+      )
+        return l;
+      const ids = l.taskIds.filter((x) => x !== id);
+      ids.splice(ids.indexOf(before) + (after ? 1 : 0), 0, id);
+      return { ...l, taskIds: ids };
+    }),
+  };
+}
+
+export function quickDate(
+  which: "today" | "tomorrow" | "eow",
+  now = new Date(),
+): string {
+  const date = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  if (which === "tomorrow") date.setDate(date.getDate() + 1);
+  if (which === "eow")
+    date.setDate(date.getDate() + ((5 - date.getDay() + 7) % 7));
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
 }

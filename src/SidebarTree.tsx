@@ -5,9 +5,15 @@ import {
   Plus,
   Pencil,
   FileText,
+  Trash2,
 } from "lucide-react";
 import { useEffect, useState } from "react";
-import { type Notebook, reorderSections, moveSubsection } from "./model";
+import {
+  type Notebook,
+  reorderSections,
+  moveSubsection,
+  movePage,
+} from "./model";
 const dragType = "application/x-task-notebook-navigation";
 type Props = {
   db: Notebook;
@@ -21,6 +27,7 @@ type Props = {
   ) => void;
   createPage: (sectionId: string, parentId?: string | null) => void;
   openPage: (id: string) => void;
+  remove: (kind: "section" | "subsection" | "page", id: string) => void;
 };
 export default function SidebarTree({
   db,
@@ -29,6 +36,7 @@ export default function SidebarTree({
   ask,
   createPage,
   openPage,
+  remove,
 }: Props) {
   const ui = db.ui ?? { collapsedSections: [], collapsedSubsections: [] };
   const [target, setTarget] = useState<string | null>(null);
@@ -75,7 +83,7 @@ export default function SidebarTree({
     });
   const start = (
     e: React.DragEvent,
-    type: "section" | "subsection",
+    type: "section" | "subsection" | "page",
     id: string,
   ) => {
     e.dataTransfer.setData(dragType, JSON.stringify({ type, id }));
@@ -99,6 +107,8 @@ export default function SidebarTree({
         change((d) => reorderSections(d, item.id, parent));
       if (item.type === "subsection")
         change((d) => moveSubsection(d, item.id, parent, before));
+      if (item.type === "page" && before)
+        change((d) => movePage(d, item.id, before, null));
     } catch {}
   };
   const pages = (
@@ -109,15 +119,49 @@ export default function SidebarTree({
     db.pages
       .filter((p) => p.sectionId === sectionId && p.parentId === parentId)
       .map((p) => (
-        <div key={p.id}>
-          <button
-            className={`page-link ${view.type === "page" && view.id === p.id ? "selected" : ""}`}
-            style={{ paddingLeft: 38 + depth * 14 }}
-            onClick={() => openPage(p.id)}
+        <div key={p.id} data-page={p.id}>
+          <div
+            className={`page-tree-row ${target === p.id ? "drop-target" : ""}`}
+            style={{ paddingLeft: 16 + depth * 14 }}
+            onDragOver={(e) => over(e, p.id)}
+            onDrop={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              setTarget(null);
+              try {
+                const item = JSON.parse(e.dataTransfer.getData(dragType));
+                if (item.type === "page")
+                  change((d) =>
+                    movePage(d, item.id, sectionId, parentId, p.id),
+                  );
+              } catch {}
+            }}
           >
-            <FileText size={14} />
-            <span>{p.title}</span>
-          </button>
+            <button
+              className="tree-drag"
+              draggable
+              aria-label={`Drag page ${p.title}`}
+              onDragStart={(e) => start(e, "page", p.id)}
+              onDragEnd={() => setTarget(null)}
+            >
+              <GripVertical size={12} />
+            </button>
+            <button
+              className={`page-link ${view.type === "page" && view.id === p.id ? "selected" : ""}`}
+              onClick={() => openPage(p.id)}
+            >
+              <FileText size={14} />
+              <span>{p.title}</span>
+            </button>
+            <button
+              className="icon-button"
+              aria-label={`Delete page ${p.title}`}
+              title="Delete page"
+              onClick={() => remove("page", p.id)}
+            >
+              <Trash2 size={12} />
+            </button>
+          </div>
           {pages(sectionId, p.id, depth + 1)}
         </div>
       ));
@@ -175,6 +219,14 @@ export default function SidebarTree({
                 }
               >
                 <Pencil size={13} />
+              </button>
+              <button
+                className="icon-button"
+                aria-label={`Delete section ${c.name}`}
+                title="Delete section"
+                onClick={() => remove("section", c.id)}
+              >
+                <Trash2 size={13} />
               </button>
               <button
                 className="icon-button"
@@ -256,6 +308,14 @@ export default function SidebarTree({
                           }
                         >
                           <Pencil size={12} />
+                        </button>
+                        <button
+                          className="icon-button"
+                          aria-label={`Delete subsection ${s.name}`}
+                          title="Delete subsection"
+                          onClick={() => remove("subsection", s.id)}
+                        >
+                          <Trash2 size={12} />
                         </button>
                         <button
                           className="icon-button"
