@@ -72,6 +72,8 @@ import {
 } from "./selection";
 import Editor from "./Editor";
 import SidebarTree from "./SidebarTree";
+import PageSearchPanel from "./PageSearchPanel";
+import { highlightRanges, type SearchMatch } from "./pageSearch";
 const fullDate = (s: string) =>
   `${s.slice(5, 7)}/${s.slice(8, 10)}/${s.slice(0, 4)}`;
 function Tool({
@@ -110,6 +112,23 @@ export default function App() {
   const [query, setQuery] = useState(""),
     [sidebar, setSidebar] = useState(true),
     [extraDates, setExtraDates] = useState<string[]>([]);
+  const [pageSearchOpen, setPageSearchOpen] = useState(false);
+  const pageSearchInput = useRef<HTMLInputElement>(null);
+  const [searchTarget, setSearchTarget] = useState<{
+    pageId: string;
+    bulletId: string | null;
+    terms: string[];
+  } | null>(null);
+  const launchPageSearch = () => {
+    if (!latest.current) return;
+    setPageSearchOpen(true);
+    pageSearchInput.current?.focus();
+    pageSearchInput.current?.select();
+  };
+  const closePageSearch = () => {
+    setPageSearchOpen(false);
+    setSearchTarget(null);
+  };
   const [dialog, setDialog] = useState<{
     title: string;
     label: string;
@@ -289,6 +308,13 @@ export default function App() {
   useEffect(() => {
     const key = (e: KeyboardEvent) => {
       if (dialog || !(e.ctrlKey || e.metaKey)) return;
+      if (e.key.toLowerCase() === "f" && !e.shiftKey && !e.altKey) {
+        e.preventDefault();
+        e.stopPropagation();
+        launchPageSearch();
+        return;
+      }
+      if ((e.target as Element).closest(".page-search-panel")) return;
       if (e.key.toLowerCase() === "z" || e.key.toLowerCase() === "y") {
         e.preventDefault();
         e.stopPropagation();
@@ -298,6 +324,92 @@ export default function App() {
     document.addEventListener("keydown", key, true);
     return () => document.removeEventListener("keydown", key, true);
   });
+  useEffect(() => {
+    CSS.highlights.delete("page-search-match");
+    if (
+      !searchTarget ||
+      view?.type !== "page" ||
+      view.id !== searchTarget.pageId
+    )
+      return;
+    const target =
+      searchTarget.bulletId !== null
+        ? notesHost.current?.querySelector<HTMLElement>(
+            `[data-bullet="${CSS.escape(searchTarget.bulletId)}"] .rich-editor`,
+          )
+        : document.querySelector<HTMLElement>(".page-heading h1");
+    if (!target) return;
+    const ranges = highlightRanges(target, searchTarget.terms);
+    CSS.highlights.set("page-search-match", new Highlight(...ranges));
+    const matchRect = ranges[0]?.getBoundingClientRect();
+    if (matchRect?.height) {
+      window.scrollBy({
+        top: matchRect.top + matchRect.height / 2 - window.innerHeight / 2,
+        behavior: "smooth",
+      });
+    } else target.scrollIntoView({ block: "center", behavior: "smooth" });
+    const clear = () => {
+      CSS.highlights.delete("page-search-match");
+      setSearchTarget(null);
+    };
+    const timer = window.setTimeout(clear, 8000);
+    const before = (e: Event) => {
+      if ((e.target as Element).closest(".notes-sheet")) clear();
+    };
+    document.addEventListener("beforeinput", before);
+    return () => {
+      window.clearTimeout(timer);
+      document.removeEventListener("beforeinput", before);
+      CSS.highlights.delete("page-search-match");
+    };
+  }, [searchTarget, view?.id]);
+  const openSearchResult = (
+    pageId: string,
+    match: SearchMatch,
+    terms: string[],
+  ) => {
+    const state = latest.current;
+    const page = state?.pages.find((p) => p.id === pageId);
+    if (!state || !page) return;
+    const subsection = state.sections.find((s) => s.id === page.sectionId)!;
+    const ancestors = new Set<string>();
+    let parent = page.bullets.find((b) => b.id === match.bulletId)?.parentId;
+    while (parent) {
+      const bullet = page.bullets.find((b) => b.id === parent)!;
+      ancestors.add(identity(bullet));
+      parent = bullet.parentId;
+    }
+    const ui = state.ui;
+    if (
+      ui &&
+      (ui.collapsedSections.includes(subsection.customerId) ||
+        ui.collapsedSubsections.includes(subsection.id) ||
+        ui.collapsedBullets?.some((id) => ancestors.has(id)))
+    ) {
+      // Revealing a search result changes view preferences, without adding a
+      // notebook edit to the undo history or changing linked task provenance.
+      const next = {
+        ...state,
+        ui: {
+          ...ui,
+          collapsedSections: ui.collapsedSections.filter(
+            (id) => id !== subsection.customerId,
+          ),
+          collapsedSubsections: ui.collapsedSubsections.filter(
+            (id) => id !== subsection.id,
+          ),
+          collapsedBullets: (ui.collapsedBullets ?? []).filter(
+            (id) => !ancestors.has(id),
+          ),
+        },
+      };
+      latest.current = next;
+      setDb(next);
+    }
+    setView({ type: "page", id: pageId });
+    setQuery("");
+    setSearchTarget({ pageId, bulletId: match.bulletId, terms });
+  };
   const patch = (
     id: string,
     fn: (b: Bullet) => Bullet,
@@ -873,6 +985,7 @@ export default function App() {
     const host = notesHost.current;
     if (!host) return;
     const confineCaret = () => {
+      if (document.activeElement?.closest(".page-search-panel")) return null;
       const range = currentRange();
       if (
         !range?.collapsed ||
@@ -1608,7 +1721,9 @@ export default function App() {
     if (cut) removeTaskSelection(groups, true);
   };
   return (
-    <div className={`app ${sidebar ? "" : "sidebar-hidden"}`}>
+    <div
+      className={`app ${sidebar ? "" : "sidebar-hidden"} ${pageSearchOpen ? "page-search-open" : ""}`}
+    >
       <aside className="sidebar">
         <div className="brand">
           <div className="brand-icon">
@@ -1630,6 +1745,19 @@ export default function App() {
           <span className="count">
             {tasksOf(db).filter((t) => !t.bullet.completed).length}
           </span>
+        </button>
+        <button
+          type="button"
+          className={`nav-primary ${pageSearchOpen ? "selected" : ""}`}
+          aria-label="Search pages"
+          onClick={launchPageSearch}
+          aria-expanded={pageSearchOpen}
+          aria-keyshortcuts="Control+F"
+          title="Search pages (Ctrl+F)"
+        >
+          <Search size={18} />
+          Search pages
+          <kbd className="search-shortcut">Ctrl+F</kbd>
         </button>
         <div className="sidebar-heading">
           SECTIONS
@@ -2102,6 +2230,16 @@ export default function App() {
           Task Notebook<span>Local notes. Clear next steps.</span>
         </footer>
       </main>
+      {pageSearchOpen && (
+        <PageSearchPanel
+          db={db}
+          currentPageId={page?.id ?? null}
+          inputRef={pageSearchInput}
+          onClose={closePageSearch}
+          onQueryChange={() => setSearchTarget(null)}
+          onOpenResult={openSearchResult}
+        />
+      )}
       <input
         ref={imageInput}
         type="file"
