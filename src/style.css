@@ -1077,6 +1077,15 @@ kbd {
   flex-shrink: 0;
   color: #647262;
 }
+.task-card .bullet-row {
+  padding-left: 19px;
+}
+.task-card .bullet-collapse {
+  position: absolute;
+  left: 0;
+  top: 10px;
+  margin: 0;
+}
 .schedule-control {
   flex-wrap: wrap;
   gap: 8px;

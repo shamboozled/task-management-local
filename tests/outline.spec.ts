@@ -695,3 +695,133 @@ test("subsection drag handles leave no expanding gap before the name", async ({
   expect(grip.width).toBeLessThanOrEqual(18);
   expect(label.x - grip.x - grip.width).toBeLessThanOrEqual(6);
 });
+
+test("task-list Tab and Shift+Tab create nested information, preserve the caret and sync linked pages", async ({
+  page,
+}) => {
+  const state = fixture(true);
+  state.pages[1].bullets = state.pages[0].bullets.map((b) => ({
+    ...b,
+    id: "copy-" + b.id,
+    sharedId: b.id,
+    parentId: b.parentId ? "copy-" + b.parentId : null,
+  }));
+  await seed(page, state);
+  const card = page.locator('[data-task="root"]');
+  const root = card.locator(':scope > [data-bullet="root"] .rich-editor');
+  // Both chevron states stay inside the card and centered on the checkbox.
+  const bounds = await card.boundingBox();
+  const chevron = card.locator(":scope > .bullet-row .bullet-collapse");
+  for (let n = 0; n < 2; n++) {
+    const icon = (await chevron.locator("svg").boundingBox())!;
+    const check = (await card
+      .locator(":scope > .bullet-row .task-check")
+      .boundingBox())!;
+    expect(icon.x).toBeGreaterThan(bounds!.x + 1);
+    expect(
+      Math.abs(icon.y + icon.height / 2 - check.y - check.height / 2),
+    ).toBeLessThanOrEqual(0.5);
+    await chevron.click();
+  }
+  // Indenting into a collapsed task also reveals the new child for typing.
+  await chevron.click();
+  await root.click();
+  await page.keyboard.press("End");
+  await page.keyboard.press("Enter");
+  const first = card.locator(".task-continuations .rich-editor").first();
+  await expect(first).toBeFocused();
+  const id = await first.locator("..").getAttribute("data-bullet");
+  await page.keyboard.press("Tab");
+  const child = card.locator(`[data-bullet="${id}"] .rich-editor`);
+  await expect(child).toBeFocused();
+  await expect(card.locator(".attached-info")).toHaveCount(1);
+  expect((await child.boundingBox())!.x).toBeGreaterThan(
+    (await root.boundingBox())!.x,
+  );
+  await page.keyboard.type("Info");
+  await page.keyboard.press("Enter");
+  await page.keyboard.press("Tab");
+  await page.keyboard.type("Nested");
+  const nestedId = await page.evaluate(
+    () =>
+      document.activeElement?.closest<HTMLElement>("[data-bullet]")?.dataset
+        .bullet,
+  );
+  expect(nestedId).toBeTruthy();
+  await page.getByRole("heading", { level: 1 }).click();
+  await expect(page.getByText("Saved locally", { exact: true })).toBeVisible();
+  const saved = await page.evaluate(() => window.notebookDesktop!.load());
+  for (const p of saved!.pages.filter((p) => ["a", "b"].includes(p.id))) {
+    const info = p.bullets.find((b) => b.html === "Info")!;
+    const nested = p.bullets.find((b) => b.html === "Nested")!;
+    const parent = p.bullets.find((b) => b.html === "Parent")!;
+    expect(info.parentId).toBe(parent.id);
+    expect(nested.parentId).toBe(info.id);
+  }
+  // Outdenting across task-card wrappers keeps the caret and the whole subtree.
+  await child.click();
+  await page.keyboard.press("End");
+  await page.keyboard.press("Shift+Tab");
+  const sibling = card.locator(`[data-bullet="${id}"] .rich-editor`);
+  await expect(sibling).toBeFocused();
+  await page.keyboard.type(" changed");
+  await expect(sibling).toHaveText("Info changed");
+  expect((await sibling.boundingBox())!.x).toBe((await root.boundingBox())!.x);
+  await open(page, "Notes A");
+  await expect(page.locator(`[data-bullet="${id}"]`).locator("..")).toHaveCSS(
+    "margin-left",
+    "0px",
+  );
+  await expect(
+    page.locator(`[data-bullet="${nestedId}"]`).locator(".."),
+  ).toHaveCSS("margin-left", "24px");
+});
+
+test("task-list indenting an existing child task edits its source hierarchy and keeps the caret in the chosen card", async ({
+  page,
+}) => {
+  await seed(page, fixture(true));
+  const parentCard = page.locator('[data-task="root"]');
+  const childCard = page.locator('[data-task="child"]');
+  const editor = childCard.locator(
+    ':scope > [data-bullet="child"] .rich-editor',
+  );
+  await editor.evaluate((el) => {
+    (el as HTMLElement).focus();
+    const range = document.createRange();
+    range.setStart(el.firstChild!, 3);
+    range.collapse(true);
+    const selection = window.getSelection()!;
+    selection.removeAllRanges();
+    selection.addRange(range);
+  });
+  await page.keyboard.press("Shift+Tab");
+  await expect(editor).toBeFocused();
+  await expect(parentCard.locator(".attached-info")).toHaveCount(0);
+  await page.keyboard.type("X");
+  await expect(editor).toHaveText("ChiXld");
+  await page.keyboard.press("Tab");
+  await expect(editor).toBeFocused();
+  await expect(
+    parentCard.locator('[data-bullet="child"] .rich-editor'),
+  ).toHaveText("ChiXld");
+  await page.keyboard.type("Y");
+  await expect(editor).toHaveText("ChiXYld");
+  await expect(
+    parentCard.locator('[data-bullet="child"] .rich-editor'),
+  ).toHaveText("ChiXYld");
+  await page.keyboard.press("Control+z");
+  await expect(editor).toHaveText("ChiXld");
+  await page.keyboard.press("Control+z");
+  await expect(parentCard.locator(".attached-info")).toHaveCount(0);
+  await expect(editor).toBeFocused();
+  await open(page, "Notes A");
+  await expect(page.locator('[data-bullet="child"]').locator("..")).toHaveCSS(
+    "margin-left",
+    "0px",
+  );
+  await expect(page.locator('[data-bullet="detail"]').locator("..")).toHaveCSS(
+    "margin-left",
+    "24px",
+  );
+});

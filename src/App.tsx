@@ -411,13 +411,21 @@ export default function App() {
     focus(bullet.id, 0);
     previousEnter.current = null;
   };
-  const indent = (pageId: string, b: Bullet, out = false) => {
-    const el = document.querySelector<HTMLDivElement>(
-      `[data-bullet="${b.id}"] .rich-editor`,
-    );
+  const indent = (
+    pageId: string,
+    b: Bullet,
+    out = false,
+    activeEditor?: HTMLDivElement,
+    contextId?: string,
+  ) => {
+    const el =
+      activeEditor ??
+      document.querySelector<HTMLDivElement>(
+        `[data-bullet="${b.id}"] .rich-editor`,
+      );
     const offset = el ? caretOffset(el) : 0;
-    change((d) =>
-      editPage(d, pageId, (p) => {
+    change((d) => {
+      const next = editPage(d, pageId, (p) => {
         let parentId = b.parentId;
         if (out)
           parentId =
@@ -431,12 +439,38 @@ export default function App() {
         return {
           ...p,
           bullets: p.bullets.map((x) =>
-            x.id === b.id ? { ...x, parentId } : x,
+            x.id === b.id
+              ? {
+                  ...x,
+                  parentId,
+                  taskListContextId: contextId ?? x.taskListContextId,
+                }
+              : x,
           ),
         };
-      }),
-    );
-    if (el) setCaret(el, offset);
+      });
+      if (!contextId || next === d) return next;
+      const source = next.pages.find((p) => p.id === pageId)!;
+      const ancestors = new Set<string>();
+      let parent = source.bullets.find((x) => x.id === b.id)?.parentId;
+      while (parent) {
+        const ancestor = source.bullets.find((x) => x.id === parent)!;
+        ancestors.add(identity(ancestor));
+        parent = ancestor.parentId;
+      }
+      const hidden = next.ui?.collapsedBullets ?? [];
+      if (!hidden.some((id) => ancestors.has(id))) return next;
+      return {
+        ...next,
+        ui: {
+          collapsedSections: next.ui?.collapsedSections ?? [],
+          collapsedSubsections: next.ui?.collapsedSubsections ?? [],
+          collapsedBullets: hidden.filter((id) => !ancestors.has(id)),
+        },
+      };
+    });
+    if (contextId) focus(b.id, offset);
+    else if (el) setCaret(el, offset);
   };
   const remove = (pageId: string, b: Bullet) => {
     const p = latest.current?.pages.find((p) => p.id === pageId);
@@ -1202,9 +1236,21 @@ export default function App() {
         "[data-task-context]",
       )?.dataset.taskContext;
       if (source) enterBullet(source, b, e.currentTarget, context);
-    } else if (pageId && e.key === "Tab") {
+    } else if (
+      e.key === "Tab" &&
+      !e.ctrlKey &&
+      !e.metaKey &&
+      !e.altKey &&
+      !selectedCell()
+    ) {
       e.preventDefault();
-      indent(pageId, b, e.shiftKey);
+      const source = latest.current?.pages.find((p) =>
+        p.bullets.some((x) => x.id === b.id),
+      );
+      const context = e.currentTarget.closest<HTMLElement>(
+        "[data-task-context]",
+      )?.dataset.taskContext;
+      if (source) indent(source.id, b, e.shiftKey, e.currentTarget, context);
     }
   };
   const renderBullet = (b: Bullet, pageId?: string, inherited = false) => (
