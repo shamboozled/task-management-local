@@ -2,6 +2,8 @@
 
 A personal Windows desktop notebook with section/subsection/page organization, rich information bullets, and a synchronized task list. It runs offline and stores your notebook in a real SQLite file, independently of installed browsers and the location of the executable.
 
+For a standalone document you can give another model to reproduce the app, use [the desktop rebuild specification](DESKTOP_REBUILD_SPEC.md). It includes the approved editing and search behavior, data contracts, Windows build instructions, and acceptance checks.
+
 ## Build a Windows executable
 
 Do these steps **on Windows 10 or 11, 64-bit**:
