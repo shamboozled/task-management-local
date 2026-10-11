@@ -168,10 +168,6 @@ svg {
   color: #768570;
   font-size: 12px;
 }
-.section-name > button:first-child {
-  text-align: left;
-  flex: 1;
-}
 .page-link {
   display: flex;
   align-items: center;

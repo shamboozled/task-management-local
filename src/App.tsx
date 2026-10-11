@@ -25,6 +25,7 @@ import {
 } from "lucide-react";
 import {
   type Notebook,
+  type Page,
   type Bullet,
   type Task,
   uid,
@@ -137,9 +138,12 @@ export default function App() {
   const notesHost = useRef<HTMLDivElement>(null);
   const pendingDates = useRef(new Set<string>());
   const previousEnter = useRef<string | null>(null);
-  const pendingFocus = useRef<{ id: string; offset: number | "end" } | null>(
-    null,
-  );
+  const focusCard = useRef<string | null>(null);
+  const pendingFocus = useRef<{
+    id: string;
+    offset: number | "end";
+    card: string | null;
+  } | null>(null);
   const remember = (): History | null =>
     latest.current
       ? {
@@ -152,9 +156,13 @@ export default function App() {
   const restoreFocus = () => {
     const target = pendingFocus.current;
     if (!target) return;
-    const el = document.querySelector<HTMLDivElement>(
-      `[data-bullet="${target.id}"] .rich-editor`,
-    );
+    const selector = `[data-bullet="${target.id}"] .rich-editor`;
+    const el =
+      (target.card
+        ? document.querySelector<HTMLDivElement>(
+            `[data-task-context="${target.card}"] ${selector}`,
+          )
+        : null) ?? document.querySelector<HTMLDivElement>(selector);
     if (!el) {
       pendingFocus.current = null;
       return;
@@ -171,7 +179,7 @@ export default function App() {
       pendingFocus.current = null;
       return;
     }
-    pendingFocus.current = { id, offset };
+    pendingFocus.current = { id, offset, card: focusCard.current };
     requestAnimationFrame(restoreFocus);
   };
   useLayoutEffect(restoreFocus);
@@ -526,6 +534,70 @@ export default function App() {
     }
     return true;
   };
+  const enterBullet = (
+    p: Page,
+    b: Bullet,
+    el: HTMLDivElement,
+    contextId = b.taskListContextId,
+  ) => {
+    if (isBlank(el.innerHTML) && previousEnter.current === b.id) {
+      if (b.parentId) indent(p.id, b, true);
+      else {
+        const bullet = { ...newBullet(b.id), taskListContextId: contextId };
+        change((d) =>
+          editPage(d, p.id, (x) => {
+            const bullets = [...x.bullets];
+            bullets.splice(
+              bullets.findIndex((x) => x.id === b.id) + 1,
+              0,
+              bullet,
+            );
+            return { ...x, bullets };
+          }),
+        );
+        focus(bullet.id, 0);
+        previousEnter.current = bullet.id;
+      }
+      return;
+    }
+    const { before, after } = splitHtml(el);
+    const atStart = isBlank(before) && !isBlank(el.innerHTML);
+    const middle = !atStart && !isBlank(after);
+    const bullet = {
+      ...newBullet(b.parentId),
+      taskListContextId: contextId,
+      html: middle ? sanitize(after) : "",
+    };
+    change((d) =>
+      editPage(d, p.id, (x) => {
+        let bullets = [...x.bullets];
+        const index = bullets.findIndex((x) => x.id === b.id);
+        if (atStart) bullets.splice(index, 0, bullet);
+        else if (middle) {
+          bullets = bullets.map((x) =>
+            x.id === b.id
+              ? editBullet(x, sanitize(before))
+              : x.parentId === b.id
+                ? { ...x, parentId: bullet.id }
+                : x,
+          );
+          bullets.splice(index + 1, 0, bullet);
+        } else {
+          const end =
+            Math.max(
+              index,
+              ...descendants(x, b.id).map((child) =>
+                bullets.findIndex((x) => x.id === child.id),
+              ),
+            ) + 1;
+          bullets.splice(end, 0, bullet);
+        }
+        return { ...x, bullets };
+      }),
+    );
+    focus(bullet.id, 0);
+    previousEnter.current = bullet.id;
+  };
   const notesKeys = (e: React.KeyboardEvent<HTMLDivElement>) => {
     const el =
       editorAt(window.getSelection()?.focusNode ?? null) ?? editor.current;
@@ -662,62 +734,7 @@ export default function App() {
         deleteSelection();
         return;
       }
-      if (isBlank(el.innerHTML) && previousEnter.current === b.id) {
-        if (b.parentId) indent(p.id, b, true);
-        else {
-          const bullet = newBullet(b.id);
-          change((d) =>
-            editPage(d, p.id, (x) => {
-              const bullets = [...x.bullets];
-              bullets.splice(
-                bullets.findIndex((x) => x.id === b.id) + 1,
-                0,
-                bullet,
-              );
-              return { ...x, bullets };
-            }),
-          );
-          focus(bullet.id, 0);
-          previousEnter.current = bullet.id;
-        }
-        return;
-      }
-      const { before, after } = splitHtml(el);
-      const atStart = isBlank(before) && !isBlank(el.innerHTML);
-      const middle = !atStart && !isBlank(after);
-      const bullet = {
-        ...newBullet(b.parentId),
-        html: middle ? sanitize(after) : "",
-      };
-      change((d) =>
-        editPage(d, p.id, (x) => {
-          let bullets = [...x.bullets];
-          const index = bullets.findIndex((x) => x.id === b.id);
-          if (atStart) bullets.splice(index, 0, bullet);
-          else if (middle) {
-            bullets = bullets.map((x) =>
-              x.id === b.id
-                ? editBullet(x, sanitize(before))
-                : x.parentId === b.id
-                  ? { ...x, parentId: bullet.id }
-                  : x,
-            );
-            bullets.splice(index + 1, 0, bullet);
-          } else {
-            const end =
-              Math.max(
-                index,
-                ...descendants(x, b.id).map((child) =>
-                  bullets.findIndex((x) => x.id === child.id),
-                ),
-              ) + 1;
-            bullets.splice(end, 0, bullet);
-          }
-          return { ...x, bullets };
-        }),
-      );
-      focus(bullet.id, 0);
-      previousEnter.current = bullet.id;
+      enterBullet(p, b, el);
     }
   };
   const notesInput = (e: React.FormEvent<HTMLDivElement>) => {
@@ -821,8 +838,48 @@ export default function App() {
   useEffect(() => {
     const host = notesHost.current;
     if (!host) return;
+    const confineCaret = () => {
+      const range = currentRange();
+      if (
+        !range?.collapsed ||
+        !host.contains(range.startContainer) ||
+        editorAt(range.startContainer)
+      )
+        return null;
+      const node =
+        range.startContainer instanceof Element
+          ? range.startContainer
+          : range.startContainer.parentElement;
+      const row = node?.closest("[data-bullet]");
+      const adjacent =
+        range.startContainer.childNodes[range.startOffset] ??
+        range.startContainer.childNodes[range.startOffset - 1];
+      const el =
+        row?.querySelector<HTMLDivElement>(".rich-editor") ??
+        (adjacent instanceof Element
+          ? adjacent.querySelector<HTMLDivElement>(".rich-editor")
+          : null) ??
+        host.querySelector<HTMLDivElement>(".rich-editor");
+      if (!el) return null;
+      setCaret(el, 0);
+      focusEditor(
+        el.closest<HTMLElement>("[data-bullet]")!.dataset.bullet!,
+        el,
+      );
+      return el;
+    };
     const before = (e: InputEvent) => {
-      if (e.inputType === "historyUndo" || e.inputType === "historyRedo") {
+      const confined = confineCaret();
+      if (confined) {
+        e.preventDefault();
+        if (e.inputType === "insertText" && e.data) {
+          insertHtml(confined, plainHtml(e.data));
+          editText(focusedId.current!, confined.innerHTML, view?.id);
+        }
+      } else if (
+        e.inputType === "historyUndo" ||
+        e.inputType === "historyRedo"
+      ) {
         e.preventDefault();
         undo(e.inputType === "historyRedo");
       } else if (e.inputType === "insertText" && selectedIds().length > 1) {
@@ -832,11 +889,18 @@ export default function App() {
         e.preventDefault();
     };
     host.addEventListener("beforeinput", before);
-    return () => host.removeEventListener("beforeinput", before);
+    document.addEventListener("selectionchange", confineCaret);
+    return () => {
+      host.removeEventListener("beforeinput", before);
+      document.removeEventListener("selectionchange", confineCaret);
+    };
   });
   const focusEditor = (id: string, el: HTMLDivElement) => {
     focusedId.current = id;
     editor.current = el;
+    focusCard.current =
+      el.closest<HTMLElement>("[data-task-context]")?.dataset.taskContext ??
+      null;
   };
   const deleteNavigation = (
     kind: "section" | "subsection" | "page",
@@ -1035,7 +1099,8 @@ export default function App() {
     ) ||
     allTasks.some(
       (t) =>
-        (identity(t.bullet) === identity(b) && t.information.length > 0) ||
+        (identity(t.bullet) === identity(b) &&
+          t.information.some((i) => !i.sibling)) ||
         t.information.some(
           (i, n) =>
             identity(i.bullet) === identity(b) &&
@@ -1054,6 +1119,8 @@ export default function App() {
     pageId?: string,
   ) => {
     if (readOnly) return;
+    if (e.key !== "Enter" || e.shiftKey || e.ctrlKey || e.metaKey)
+      previousEnter.current = null;
     if (["Backspace", "Delete"].includes(e.key) && !pageId) {
       const range = currentRange();
       if (
@@ -1121,7 +1188,6 @@ export default function App() {
         );
       }
     } else if (
-      pageId &&
       e.key === "Enter" &&
       !e.shiftKey &&
       !e.ctrlKey &&
@@ -1129,7 +1195,13 @@ export default function App() {
       !((e.target as Element).closest("td,th") || selectedCell())
     ) {
       e.preventDefault();
-      addBullet(pageId, b);
+      const source = latest.current?.pages.find((p) =>
+        p.bullets.some((x) => x.id === b.id),
+      );
+      const context = e.currentTarget.closest<HTMLElement>(
+        "[data-task-context]",
+      )?.dataset.taskContext;
+      if (source) enterBullet(source, b, e.currentTarget, context);
     } else if (pageId && e.key === "Tab") {
       e.preventDefault();
       indent(pageId, b, e.shiftKey);
@@ -1140,6 +1212,19 @@ export default function App() {
       className={`bullet-row ${b.completed ? "completed" : ""}`}
       key={b.id}
       data-bullet={b.id}
+      onMouseDown={(e) => {
+        if (readOnly || (e.target as Element).closest(".rich-editor")) return;
+        // Keep markers and controls outside the text insertion area while the
+        // page remains one editing host for selections across bullet rows.
+        e.preventDefault();
+        if ((e.target as Element).closest("button")) return;
+        const el =
+          e.currentTarget.querySelector<HTMLDivElement>(".rich-editor");
+        if (el) {
+          setCaret(el, e.clientX < el.getBoundingClientRect().left ? 0 : "end");
+          focusEditor(b.id, el);
+        }
+      }}
     >
       {b.kind === "task" && hasChildren(b) && (
         <button
@@ -1254,11 +1339,36 @@ export default function App() {
           {renderBullet(bullet, page.id, true)}
         </div>
       ));
+  const renderTaskInformation = (task: Task, sibling?: "before" | "after") => {
+    const items = task.information.filter((i) => i.sibling === sibling);
+    if (!items.length) return null;
+    return (
+      <div className={sibling ? "task-continuations" : "attached-info"}>
+        {items
+          .filter((i, index) => {
+            for (let n = index - 1, level = i.depth; n >= 0; n--) {
+              const ancestor = items[n];
+              if (ancestor.depth < level) {
+                if (collapsed.has(identity(ancestor.bullet))) return false;
+                level = ancestor.depth;
+              }
+            }
+            return true;
+          })
+          .map((i) => (
+            <div key={i.bullet.id} style={{ marginLeft: i.depth * 18 }}>
+              {renderBullet(i.bullet)}
+            </div>
+          ))}
+      </div>
+    );
+  };
   const taskCard = (task: Task) => (
     <article
       key={task.bullet.id}
       className="task-card"
       data-task={task.bullet.id}
+      data-task-context={identity(task.bullet)}
       onDragOver={(e) => {
         if (!readOnly) {
           e.preventDefault();
@@ -1323,27 +1433,10 @@ export default function App() {
           <ArrowUpRight size={13} />
         </button>
       </div>
+      {renderTaskInformation(task, "before")}
       {renderBullet(task.bullet)}
-      {task.information.length > 0 && !collapsed.has(identity(task.bullet)) && (
-        <div className="attached-info">
-          {task.information
-            .filter((i, index) => {
-              for (let n = index - 1, level = i.depth; n >= 0; n--) {
-                const ancestor = task.information[n];
-                if (ancestor.depth < level) {
-                  if (collapsed.has(identity(ancestor.bullet))) return false;
-                  level = ancestor.depth;
-                }
-              }
-              return true;
-            })
-            .map((i) => (
-              <div key={i.bullet.id} style={{ marginLeft: i.depth * 18 }}>
-                {renderBullet(i.bullet)}
-              </div>
-            ))}
-        </div>
-      )}
+      {!collapsed.has(identity(task.bullet)) && renderTaskInformation(task)}
+      {renderTaskInformation(task, "after")}
       {!readOnly && (
         <div className="schedule-control">
           <div className="quick-dates">

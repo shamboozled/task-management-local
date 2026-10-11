@@ -7,6 +7,8 @@ export type Bullet = {
   dueDate: string | null;
   sharedId?: string;
   lastEditedPageId?: string;
+  // Information siblings created from a task card stay visible on that card.
+  taskListContextId?: string;
 };
 export type Page = {
   id: string;
@@ -22,7 +24,11 @@ export type Task = {
   pageId: string;
   pageTitle: string;
   customerName: string;
-  information: { bullet: Bullet; depth: number }[];
+  information: {
+    bullet: Bullet;
+    depth: number;
+    sibling?: "before" | "after";
+  }[];
 };
 export type TaskList = {
   id: string;
@@ -159,6 +165,21 @@ export function moveDate(
 }
 export function tasksOf(db: Notebook): Task[] {
   const active = db.taskLists.find((l) => l.id === db.activeListId)!;
+  const contextSources = new Map<string, Set<Page>>();
+  for (const page of db.pages) {
+    for (const b of page.bullets) {
+      if (b.kind !== "information" || !b.taskListContextId) continue;
+      const sources =
+        contextSources.get(b.taskListContextId) ?? new Set<Page>();
+      sources.add(page);
+      contextSources.set(b.taskListContextId, sources);
+    }
+  }
+  const orderedPages = new Map<string, ReturnType<typeof orderedBullets>>();
+  const orderedPage = (p: Page) => {
+    if (!orderedPages.has(p.id)) orderedPages.set(p.id, orderedBullets(p));
+    return orderedPages.get(p.id)!;
+  };
   const seen = new Set<string>();
   return db.pages
     .flatMap((page) =>
@@ -190,6 +211,49 @@ export function tasksOf(db: Notebook): Task[] {
             }
           }
           walk(bullet.id, 0);
+          const included = new Set(information.map((i) => identity(i.bullet)));
+          const sources = [...(contextSources.get(identity(bullet)) ?? [])];
+          sources.sort((a, b) => Number(b === page) - Number(a === page));
+          for (const source of sources) {
+            const ordered = orderedPage(source);
+            for (const context of ordered) {
+              const b = context.bullet;
+              if (
+                b.kind !== "information" ||
+                b.taskListContextId !== identity(bullet) ||
+                included.has(identity(b)) ||
+                source.bullets.find((x) => x.id === b.parentId)
+                  ?.taskListContextId === identity(bullet)
+              )
+                continue;
+              const anchor = source.bullets.find(
+                (x) => identity(x) === identity(bullet),
+              );
+              const sibling =
+                anchor &&
+                ordered.findIndex((x) => x.bullet.id === b.id) <
+                  ordered.findIndex((x) => x.bullet.id === anchor.id)
+                  ? "before"
+                  : "after";
+              const children = descendants(source, b.id);
+              // Reorganizing notes can turn a former sibling into an ancestor;
+              // a task card must not pull itself or its ancestors back in.
+              if (children.some((x) => identity(x) === identity(bullet)))
+                continue;
+              const family = new Set([b.id, ...children.map((x) => x.id)]);
+              for (const child of ordered.filter((x) =>
+                family.has(x.bullet.id),
+              )) {
+                if (included.has(identity(child.bullet))) continue;
+                information.push({
+                  bullet: child.bullet,
+                  depth: child.depth - context.depth,
+                  sibling,
+                });
+                included.add(identity(child.bullet));
+              }
+            }
+          }
           return {
             bullet,
             pageId: page.id,
@@ -356,6 +420,8 @@ export function validateBackup(value: unknown): Notebook {
       (b.sharedId !== undefined && typeof b.sharedId !== "string") ||
       (b.lastEditedPageId !== undefined &&
         typeof b.lastEditedPageId !== "string") ||
+      (b.taskListContextId !== undefined &&
+        typeof b.taskListContextId !== "string") ||
       !(
         b.dueDate === null ||
         (typeof b.dueDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(b.dueDate))
@@ -443,7 +509,11 @@ export function validateBackup(value: unknown): Notebook {
       bullet(t.bullet);
       t.information.forEach((i) => {
         bullet(i.bullet);
-        if (!Number.isInteger(i.depth) || i.depth < 0)
+        if (
+          !Number.isInteger(i.depth) ||
+          i.depth < 0 ||
+          (i.sibling !== undefined && !["before", "after"].includes(i.sibling))
+        )
           throw Error("Invalid information depth.");
       });
     });

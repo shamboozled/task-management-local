@@ -252,3 +252,67 @@ describe("navigation, scheduling and clipboard", () => {
     host.remove();
   });
 });
+
+it("keeps task-list information siblings when a linked task's source changes, without pulling unrelated notes", () => {
+  let db = linked();
+  db = editPage(db, "a", (p) => ({
+    ...p,
+    bullets: [
+      ...p.bullets,
+      {
+        ...newBullet(),
+        id: "follow",
+        html: "Follow-up",
+        taskListContextId: "t",
+      },
+      { ...newBullet("follow"), id: "follow-child", html: "More detail" },
+      { ...newBullet(), id: "unrelated", html: "Unrelated" },
+    ],
+  }));
+  db = updateBullet(
+    db,
+    db.pages[1].bullets[1].id,
+    (b) => ({ ...b, html: "Edited elsewhere" }),
+    "b",
+  );
+  const task = tasksOf(db)[0];
+  expect(task.pageId).toBe("b");
+  expect(
+    task.information
+      .filter((i) => i.sibling)
+      .map((i) => [i.bullet.html, i.depth]),
+  ).toEqual([
+    ["Follow-up", 0],
+    ["More detail", 1],
+  ]);
+  expect(task.information.some((i) => i.bullet.id === "unrelated")).toBe(false);
+  expect(validateBackup(JSON.parse(JSON.stringify(db)))).toEqual(db);
+  db = removeNavigation(db, "page", "a");
+  expect(tasksOf(db)[0].information.map((i) => i.bullet.html)).toEqual([
+    "Child",
+    "Details",
+  ]);
+});
+
+it("does not pull a task's own ancestor back into its card after reorganizing a task-list information sibling", () => {
+  let db = fixture();
+  db = editPage(db, "a", (p) => ({
+    ...p,
+    bullets: [
+      {
+        ...newBullet(),
+        id: "follow",
+        html: "Follow-up",
+        taskListContextId: "t",
+      },
+      ...p.bullets.map((b) =>
+        b.id === "t" ? { ...b, parentId: "follow" } : b,
+      ),
+    ],
+  }));
+  const task = tasksOf(db)[0];
+  expect(task.information.map((i) => i.bullet.html)).toEqual([
+    "Child",
+    "Details",
+  ]);
+});

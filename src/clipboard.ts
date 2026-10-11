@@ -135,6 +135,11 @@ export function readBulletClipboard(
         return null;
       if (b.sharedId !== undefined && typeof b.sharedId !== "string")
         return null;
+      if (
+        b.taskListContextId !== undefined &&
+        typeof b.taskListContextId !== "string"
+      )
+        return null;
       previous = entry.depth;
       b.html = sanitize(b.html);
     }
@@ -211,6 +216,7 @@ export function pasteBullets(
       parentId,
       sharedId: same && linked ? identity(bullet) : undefined,
       lastEditedPageId: pageId,
+      taskListContextId: undefined,
     };
     return b;
   });

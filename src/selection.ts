@@ -88,12 +88,17 @@ export function wholeEditorSelected(el: HTMLElement): boolean {
   if (!r || r.collapsed) return false;
   const entire = document.createRange();
   entire.selectNodeContents(el);
-  if (editorAt(r.startContainer) !== el || editorAt(r.endContainer) !== el)
-    return false;
+  // Mouse selections can end at a row boundary outside the editor. Compare
+  // the covered contents, rather than requiring both endpoints inside it.
+  const start = entire.comparePoint(r.startContainer, r.startOffset);
+  const end = entire.comparePoint(r.endContainer, r.endOffset);
+  if (start > 0 || end < 0) return false;
   const before = entire.cloneRange();
-  before.setEnd(r.startContainer, r.startOffset);
+  if (start < 0) before.collapse(true);
+  else before.setEnd(r.startContainer, r.startOffset);
   const after = entire.cloneRange();
-  after.setStart(r.endContainer, r.endOffset);
+  if (end > 0) after.collapse(false);
+  else after.setStart(r.endContainer, r.endOffset);
   const empty = (part: DocumentFragment) =>
     !part.textContent?.length && !part.querySelector("img");
   return empty(before.cloneContents()) && empty(after.cloneContents());

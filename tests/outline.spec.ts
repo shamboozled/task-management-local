@@ -477,3 +477,221 @@ test("mouse selection can cross bullet editors and replacement leaves a valid ou
   await page.keyboard.type("Replacement");
   await expect(lines(page)).toHaveText(["Replacement"]);
 });
+
+for (const taskList of [false, true]) {
+  for (const mode of ["drag", "triple-click"] as const) {
+    test(`full-text ${mode} in ${taskList ? "task lists" : "notes"} copies and cuts the task with children`, async ({
+      page,
+      desktop,
+    }) => {
+      await seed(page, fixture(true));
+      if (!taskList) await open(page, "Notes A");
+      const editor = page.locator(
+        taskList
+          ? '[data-task="root"] > [data-bullet="root"] .rich-editor'
+          : '.notes-sheet [data-bullet="root"] .rich-editor',
+      );
+      if (mode === "triple-click")
+        await editor.click({ clickCount: 3, position: { x: 15, y: 12 } });
+      else {
+        const box = (await editor.boundingBox())!;
+        await page.mouse.move(box.x + 1, box.y + 12);
+        await page.mouse.down();
+        await page.mouse.move(box.x + box.width - 2, box.y + 12, { steps: 12 });
+        await page.mouse.up();
+      }
+      expect(
+        (await page.evaluate(() => window.getSelection()?.toString()))?.trim(),
+      ).toBe("Parent");
+      await page.keyboard.press("Control+c");
+      const html = await desktop.evaluate(async ({ clipboard }) =>
+        (await (await clipboard.read())[0].getType("text/html")).text(),
+      );
+      expect(html.match(/<li>/g)).toHaveLength(3);
+      expect(html).toContain("Details");
+      await page.keyboard.press("Control+x");
+      if (taskList) await expect(page.locator(".task-card")).toHaveCount(1);
+      else await expect(lines(page)).toHaveText(["Tail"]);
+      await open(page, "Notes B");
+      await page.locator('[data-bullet="blank"] .rich-editor').click();
+      await page.keyboard.press("Control+v");
+      await expect(lines(page)).toHaveText([
+        "Heading",
+        "Parent",
+        "Child",
+        "Details",
+      ]);
+      await expect(page.locator(".notes-sheet .task-check")).toHaveCount(2);
+      await page.getByRole("button", { name: "Current task list" }).click();
+      await expect(page.locator(".task-card")).toHaveCount(3);
+    });
+  }
+}
+
+test("partial mouse selection copies only text", async ({ page, desktop }) => {
+  await seed(page, fixture(true));
+  await open(page, "Notes A");
+  const editor = page.locator('[data-bullet="root"] .rich-editor');
+  const points = await editor.evaluate((el) => {
+    const range = document.createRange();
+    range.setStart(el.firstChild!, 0);
+    range.setEnd(el.firstChild!, 3);
+    const rect = range.getBoundingClientRect();
+    return { x: rect.x, y: rect.y + rect.height / 2, end: rect.right };
+  });
+  await page.mouse.move(points.x + 1, points.y);
+  await page.mouse.down();
+  await page.mouse.move(points.end, points.y, { steps: 6 });
+  await page.mouse.up();
+  expect(await page.evaluate(() => window.getSelection()?.toString())).toBe(
+    "Par",
+  );
+  await page.keyboard.press("Control+c");
+  const text = await desktop.evaluate(async ({ clipboard }) =>
+    (await (await clipboard.read())[0].getType("text/plain")).text(),
+  );
+  expect(text).toBe("Par");
+  await open(page, "Notes B");
+  await page.locator('[data-bullet="blank"] .rich-editor').click();
+  await page.keyboard.press("Control+v");
+  await expect(lines(page)).toHaveText(["Heading", "Par"]);
+  await expect(page.locator(".notes-sheet .task-check")).toHaveCount(0);
+});
+
+test("task-list Enter creates information at the same source and visual indent, splits children and supports undo", async ({
+  page,
+}) => {
+  await seed(page, fixture(true));
+  const card = page.locator('[data-task="root"]');
+  const root = card.locator(':scope > [data-bullet="root"] .rich-editor');
+  await root.click();
+  await page.keyboard.press("End");
+  await page.keyboard.press("Enter");
+  const next = card.locator(".task-continuations .rich-editor").first();
+  await expect(next).toBeFocused();
+  await expect(next).toHaveText("");
+  await expect(next.locator("..").locator(".info-dot")).toHaveCount(1);
+  expect((await next.boundingBox())!.x).toBe((await root.boundingBox())!.x);
+  await page.keyboard.type("Follow-up");
+  await page.getByRole("heading", { level: 1 }).click();
+  await expect(page.getByText("Saved locally", { exact: true })).toBeVisible();
+  await page.reload();
+  await expect(next).toHaveText("Follow-up");
+  await open(page, "Notes A");
+  await expect(lines(page)).toHaveText([
+    "Parent",
+    "Child",
+    "Details",
+    "Follow-up",
+    "Tail",
+  ]);
+  await expect(
+    page.locator(".notes-sheet .rich-editor").nth(3).locator("../.."),
+  ).toHaveCSS("margin-left", "0px");
+  await page.getByRole("button", { name: "Current task list" }).click();
+  await root.evaluate((el) => {
+    (el as HTMLElement).focus();
+    const range = document.createRange();
+    range.setStart(el.firstChild!, 3);
+    range.collapse(true);
+    const selection = window.getSelection()!;
+    selection.removeAllRanges();
+    selection.addRange(range);
+  });
+  await page.keyboard.press("Enter");
+  await expect(root).toHaveText("Par");
+  await expect(card.locator(".task-continuations .rich-editor")).toHaveText([
+    "ent",
+    "Child",
+    "Details",
+    "Follow-up",
+  ]);
+  await page.keyboard.press("Control+z");
+  await expect(root).toHaveText("Parent");
+  await expect(card.locator(".task-continuations .rich-editor")).toHaveText([
+    "Follow-up",
+  ]);
+  // The separately listed child creates a sibling at its own indent, too.
+  const childCard = page.locator('[data-task="child"]');
+  await childCard
+    .locator(':scope > [data-bullet="child"] .rich-editor')
+    .click();
+  await page.keyboard.press("End");
+  await page.keyboard.press("Enter");
+  await expect(
+    childCard.locator(".task-continuations .rich-editor"),
+  ).toBeFocused();
+  await page.keyboard.type("Child follow-up");
+  await open(page, "Notes A");
+  await expect(
+    page
+      .locator(".rich-editor")
+      .filter({ hasText: /^Child follow-up$/ })
+      .locator("../.."),
+  ).toHaveCSS("margin-left", "24px");
+});
+
+test("typing cannot escape the task text into the checkbox gutter", async ({
+  page,
+}) => {
+  await seed(page, fixture(true));
+  await open(page, "Notes A");
+  const row = page.locator('.notes-sheet [data-bullet="tail"]');
+  const box = (await row.boundingBox())!;
+  await page.mouse.click(box.x + 1, box.y + 12);
+  expect(
+    await page.evaluate(
+      () =>
+        (window.getSelection()?.anchorNode instanceof Element
+          ? (window.getSelection()?.anchorNode as Element)
+          : window.getSelection()?.anchorNode?.parentElement
+        )?.closest(".rich-editor") !== null,
+    ),
+  ).toBe(true);
+  await page.keyboard.type("Before ");
+  await expect(row.locator(".rich-editor")).toHaveText("Before Tail");
+  // Keyboard movement at the beginning also cannot leave writable text in the row shell.
+  await page.keyboard.press("Home");
+  await page.keyboard.press("ArrowLeft");
+  await page.keyboard.type("Safe ");
+  await expect(row).toHaveText(/Safe Before Tail/);
+  expect(
+    await row.evaluate((el) =>
+      [...el.childNodes]
+        .filter((node) => node.nodeType === Node.TEXT_NODE)
+        .map((node) => node.textContent)
+        .join(""),
+    ),
+  ).toBe("");
+  // Native beforeinput guards a stale/outside caret before it can change the DOM.
+  await row.evaluate((el) => {
+    const range = document.createRange();
+    range.setStart(el, 0);
+    range.collapse(true);
+    const selection = window.getSelection()!;
+    selection.removeAllRanges();
+    selection.addRange(range);
+    const event = new InputEvent("beforeinput", {
+      bubbles: true,
+      cancelable: true,
+      inputType: "insertText",
+      data: "Guard ",
+    });
+    el.dispatchEvent(event);
+    if (!event.defaultPrevented) throw Error("Gutter insertion was allowed");
+  });
+  await expect(row.locator(".rich-editor")).toHaveText(
+    "Guard Safe Before Tail",
+  );
+});
+
+test("subsection drag handles leave no expanding gap before the name", async ({
+  page,
+}) => {
+  await seed(page, fixture());
+  const row = page.locator('[data-subsection="calls"] > .section-name');
+  const grip = (await row.locator(".tree-drag").boundingBox())!;
+  const label = (await row.locator(".tree-label").boundingBox())!;
+  expect(grip.width).toBeLessThanOrEqual(18);
+  expect(label.x - grip.x - grip.width).toBeLessThanOrEqual(6);
+});
