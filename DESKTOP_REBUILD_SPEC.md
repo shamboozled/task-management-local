@@ -4,9 +4,11 @@ This is a standalone specification for reproducing **Task Notebook**, a Windows 
 
 Baseline reviewed: **October 11, 2026**, application version **1.0.0**.
 
+The current working source includes standalone task creation and group selection/moves, documented in [the task-list feature specification](TASK_LIST_CHANGE_PLAN.md) and section 16 below. Historical baseline verification is identified separately from checks of the current source. No new Windows executable or release has been produced.
+
 Source repository: <https://github.com/shamboozled/task-management-local>
 
-Reference implementation commit (before this documentation update): `224b1c4ae9c5c292115b4398e3fd1dcaa7753e65`.
+Historical baseline commit (without standalone task creation/group selection): `224b1c4ae9c5c292115b4398e3fd1dcaa7753e65`.
 
 The separate repository <https://github.com/shamboozled/task-management> contains the browser application. **Do not edit or push to that repository.** Desktop development belongs in `task-management-local` or an explicitly requested new repository.
 
@@ -18,8 +20,8 @@ You can use the following as the accompanying prompt:
 
 Two approaches are possible:
 
-- **Rebuild the existing source:** check out the reference commit and use its lockfile. This is the most reliable way to reproduce the exact interface and implementation.
-- **Reimplement the application:** treat the behavior and data contracts below as requirements. Internal code organization may change, but keep version-1 backup compatibility and the user-visible behavior unless a change is approved.
+- **Rebuild the existing source:** use the intended feature/release commit and its lockfile. The historical baseline commit above omits the newer task-list features; it can reproduce the earlier interface only.
+- **Reimplement the application:** treat the behavior and data contracts below as requirements. Internal code organization may change, but keep import support for version-1 backups and save the current version-2 format and the user-visible behavior unless a change is approved.
 
 Reproducing the same source and dependencies does not promise a byte-for-byte identical executable across machines. This document is a behavior and build specification, not an embedded copy of the complete source or every CSS rule.
 
@@ -97,7 +99,7 @@ The app initially opens the current task-list page when loading a notebook.
 
 ### Bullet types and hierarchy
 
-There are exactly two kinds: **information** and **task**. Every new bullet defaults to information. Do not create an ordinary/neutral third kind.
+There are exactly two kinds: **information** and **task**. Every new outline bullet defaults to information. The explicit Add task action on the current task list creates a task. Do not create an ordinary/neutral third kind.
 
 Each bullet has a unique placement ID, optional parent placement ID, and editable sanitized HTML. Linked placements also share a logical content identity (see section 6). Bullet nesting is independent of page/subpage nesting.
 
@@ -182,7 +184,9 @@ Sanitize pasted content, content displayed in editors, and imported backup HTML,
 
 ## 6. Shared notes and task-list behavior
 
-The current task list is a projection of live notes, not an independently editable copy. A task may have multiple placements across normal pages while remaining **one logical task**.
+The current task list projects live tasks from normal notes pages and notebook-level standalone task content. Standalone content is stored in `taskListBullets`, independently of current/historical list pages. A task may have multiple placements across normal pages while remaining **one logical task**.
+
+Tasks created with Add task initially have no source-page link. Full-task paste into a normal page creates a linked placement and establishes that page as the preferred source. Removing the last notes placement preserves the standalone origin and removes its source link. Partial-text copies establish no relationship.
 
 Each placement has its own `id` and `parentId`. Define logical identity as `sharedId ?? id`. Task-list membership, synchronization, ordering, and collapse state use this logical identity. Clipboard paste creates fresh placement IDs and retains shared identities for the task and its descendant content. Never use a page placement ID as the only identity of a shared task.
 
@@ -211,6 +215,8 @@ Enter/splitting on a task card can also create an information **sibling** beside
 
 Tasks and subtasks are collapsible in notes and task cards; persist collapse by logical identity. Completion strikes through text in all live instances. **A parent task cannot be completed while any descendant task is incomplete.** Reopening a child, or adding an incomplete child beneath a completed ancestor, reopens affected completed ancestors. Information children do not themselves block completion.
 
+Select task cards with the separate Select tasks controls, Ctrl-click toggling, or inclusive anchored Shift-click ranges. Reorder selected task cards as one ordered block by dragging a selected grip or using Move selected; one batch is one undo step. Ranges follow visible Unassigned cards, then chronological Priority groups. Selection is transient and clears on search changes/navigation. Only explicitly selected child tasks change dates. Single-card dragging remains supported.
+
 Reorder task cards by dragging their grips within Unassigned or a date group. Persist logical task ordering separately from source bullet ordering. Dropping between dates/columns also applies the scheduling operation below. Keep controls and source links separately positioned and inside the card bounds.
 
 ### Current list and historical lists
@@ -226,7 +232,7 @@ Creating a new task-list page must perform one model update:
 
 Completed tasks remain in source notes and historical snapshots, but are excluded from the new current list. Reopening a completed source task adds it back to the current list. New task conversions also add their IDs to the current list.
 
-Maintain explicit logical task ID membership so an excluded completed task is not accidentally reintroduced just because source pages still contain it. Resolve missing/deleted source bullets by omitting them from the live projection, without mutating old snapshots.
+Maintain explicit logical task ID membership so an excluded completed task is not accidentally reintroduced just because source pages still contain it. Resolve missing/deleted source bullets by omitting them from the live projection, without mutating old snapshots. Include source-less tasks while their standalone records survive.
 
 Historical snapshots must use a deep copy, not shared object references. Later source edits, completion changes, renames, subsection moves, and deletions must not rewrite historical task contents/source labels. Historical source navigation can work where the original still exists.
 
@@ -299,7 +305,7 @@ Highlighting must not modify saved HTML or create an undo step. The reference us
 
 Run search locally in memory over the current notebook. Cache extracted text per bullet/HTML and invalidate changed/deleted entries. Do not introduce a server, external search provider, persistent search database, or backup-format migration. The reference right panel is 340 px wide, reduced to 300 px at narrower window widths; keep the page usable at the 900 × 620 minimum window size without horizontal overflow.
 
-## 9. Version-1 notebook data contract
+## 9. Version-2 notebook data contract and legacy import
 
 The JSON document stored in SQLite and exported as a backup has this TypeScript shape:
 
@@ -333,7 +339,7 @@ type Section = {
 
 type Task = {
   bullet: Bullet;
-  pageId: string;
+  pageId: string | null; // null for a task without a normal-page source
   pageTitle: string;
   customerName: string; // Top-level section name
   information: {
@@ -352,7 +358,8 @@ type TaskList = {
 };
 
 type Notebook = {
-  version: 1;
+  version: 2;
+  taskListBullets: Bullet[]; // Standalone task roots, children, and context information
   customers: Customer[];
   sections: Section[];
   pages: Page[];
@@ -369,7 +376,7 @@ type Notebook = {
 
 Retain the legacy `customers`, `sections`, `customerId`, and `sectionId` field meanings for compatibility with existing browser-version exports. They are not the labels shown to the user. Use stable UUIDs for new records. Array order determines sidebar/sibling ordering.
 
-An empty notebook has empty section/subsection/page arrays and one current task list, named today, with `snapshot: null` and `taskIds: []`. Missing optional `ui` means all headings/bullets are expanded. All added metadata remains optional so older version-1 browser/desktop backups are accepted. Assign a notebook identity when needed and treat an absent sharedId as the bullet ID. New logical tasks and task-list membership use `sharedId ?? id`; placements remain uniquely identified by id.
+An empty notebook has empty section/subsection/page arrays and one current task list, named today, with `snapshot: null` and `taskIds: []`. Missing optional `ui` means all headings/bullets are expanded. Version-1 browser/desktop documents are accepted and migrated to version 2 with an initially empty `taskListBullets` array. Version-2 documents require that array; older app versions reject version 2. Validate standalone bullet identifiers, parents, kinds, and cycles with the same rules as page bullets. An empty version-2 notebook has `taskListBullets: []`. Assign a notebook identity when needed and treat an absent sharedId as the bullet ID. New logical tasks and task-list membership use `sharedId ?? id`; placements remain uniquely identified by id.
 
 Validate imported data before replacing state: supported version, required arrays and strings, unique entity/bullet IDs, supported bullet kinds, completion and date fields, valid parent references, no page/bullet ancestry cycles (including cycles through shared identities), and exactly one live task list matching `activeListId`. Snapshot bullet IDs intentionally repeat source IDs and must not be treated as duplicate live entities. Page ancestors must be in the same subsection. Reject unsupported/damaged backups with a visible error.
 
@@ -428,7 +435,7 @@ An empty database has nothing to back up. Automatic backups protect against some
 
 ### JSON export, import, and browser migration
 
-Export the complete version-1 notebook as readable JSON through a native save dialog. Include all pages, bullets, embedded images, historical snapshots, titles, and sidebar preferences. Flush pending saves first. Write to an adjacent unique temporary file and rename it to the chosen destination; handle cancellation without modifying notes.
+Export the complete version-2 notebook, including standalone task content, as readable JSON through a native save dialog. Include all pages, bullets, embedded images, historical snapshots, titles, and sidebar preferences. Flush pending saves first. Write to an adjacent unique temporary file and rename it to the chosen destination; handle cancellation without modifying notes.
 
 Restore selects a JSON file, rejects files over 100 MiB, validates the structure, sanitizes all live and snapshot HTML, and asks before replacing the notebook. Flush prior writes, create the SQLite safety backup, persist the imported notebook, then show its current task list. Report failures without announcing success.
 
@@ -593,8 +600,8 @@ On **64-bit Windows 10 or 11**, install Node.js 24 LTS and Git, then reopen Powe
 git clone https://github.com/shamboozled/task-management-local.git
 cd task-management-local
 
-# Use this commit to reproduce the documented baseline.
-git checkout 224b1c4ae9c5c292115b4398e3fd1dcaa7753e65
+# Use the intended release commit/tag with these features.
+# The historical baseline commit listed above omits standalone task creation.
 
 npm ci
 npm run dist:win
@@ -617,7 +624,7 @@ npm start
 
 There is no required backend or web server. `npm run dev` behaves like `npm start` in this baseline: rebuild and open Electron. Close/restart after source changes. A static browser preview does not have the desktop storage bridge and must not be treated as a working notebook.
 
-A GitHub source ZIP is an alternative to cloning; extract it, open PowerShell in its folder, run `npm ci`, then `npm run dist:win`. A ZIP from the default branch may contain later changes; use the reference commit when exact baseline reproduction matters.
+A GitHub source ZIP is an alternative to cloning; extract it, open PowerShell in its folder, run `npm ci`, then `npm run dist:win`. A ZIP from the default branch may contain later changes; use the intended feature/release commit when exact reproduction matters.
 
 Cloud workspace setup/publishing is not required to build or run this Windows app. Codex environment setup configuration only prepares a development workspace; it does not publish this executable or upload notes from the user's PC.
 
@@ -683,7 +690,9 @@ Tests for external links should mock/record the main-process external-open call 
 
 A useful combined regression scenario is to create a task with one information child and one incomplete child task on page A, copy its fully selected text to an empty indented bullet on page B, and verify relative indentation and shared content. There must be two distinct logical task-list entries (parent and child), even though the child also appears inside the parent's card. Edit a child on B, check A and both card appearances, and verify the parent's source link now opens B. Reject completing the parent until the child is completed. Cut a placement without deleting its other locations, undo, then delete page B and confirm A survives. Search for the edited child text across both locations before deletion and only A afterward; verify the search does not alter backup HTML. Finally roll over the task list and confirm the archived content remains unchanged by subsequent source edits.
 
-**Reference verification already performed:** 39 model/search tests, 6 SQLite storage tests, and 33 actual Electron end-to-end workflows passed in the Linux cloud workspace. The interface build and formatting passed, and an earlier packaged Linux directory app was smoke-tested with SQLite persistence. The latest changes were checked through actual Electron workflows; that earlier packaged-app check is not a new Windows packaging check. **A Windows executable was not built or run in that workspace.** A reproducing model must not turn those results into a claim of Windows execution validation; report its own checks separately.
+**Historical baseline verification:** 39 model/search tests, 6 SQLite storage tests, and 33 actual Electron end-to-end workflows passed in the Linux cloud workspace. The interface build and formatting passed, and an earlier packaged Linux directory app was smoke-tested with SQLite persistence. The latest changes were checked through actual Electron workflows; that earlier packaged-app check is not a new Windows packaging check. **A Windows executable was not built or run in that workspace.** A reproducing model must not turn those results into a claim of Windows execution validation; report its own checks separately.
+
+**Current working-source verification:** the build, 49 model/search tests, 6 SQLite storage tests, 39 actual Electron workflows, and formatting passed in Linux. The new desktop checks cover blank standalone creation, source links after copying, selection/group moves and undo, archived isolation, real close/restart, and backup export/restore. There were no skipped tests. Windows packaging, signing, and execution remain unverified.
 
 For a Windows release check, compile on Windows, start the executable, create a task with an image/table, close/reopen, move/rename the executable, verify the same notebook remains, and repeat basic editing with the network disconnected. These checks are recommended completion criteria, not claims about tests already performed.
 
@@ -691,7 +700,7 @@ For a Windows release check, compile on Windows, start the executable, create a 
 
 If rebuilding without source, implement in this order:
 
-1. Define the compatible version-1 model, placement versus shared identities, synchronized subtree operations, task projection/order, dates, completion guards, validation, and snapshot rollover.
+1. Define the version-2 model with version-1 migration/import, standalone content, nullable source links, placement versus shared identities, synchronized subtree operations, task projection/order, dates, completion guards, validation, and snapshot rollover.
 2. Implement the main-process SQLite database and backups, restricted preload bridge, serialized saving, and close handshake.
 3. Build section/subsection navigation, date-named pages/subpages, complete breadcrumbs, collapse persistence, and sidebar dragging and location deletion.
 4. Build the shared outline editor: cross-bullet selection, caret-preserving indent, split/Enter/deletion behavior, custom undo, Ctrl+T, structured clipboard with linked subtree paste, images, tables, and hyperlinks.
@@ -701,3 +710,16 @@ If rebuilding without source, implement in this order:
 8. Package the Windows portable executable and document actual verification results and remaining platform limitations.
 
 The final handoff should include complete source and lockfile, a README with Windows build/run/data/recovery instructions, the tests used, the generated executable if built, and any departures from this specification. Preserve the documented local-storage and privacy guarantees without describing app-level network filtering as an absolute firewall.
+
+## 16. Direct task creation and group moves
+
+See [TASK_LIST_CHANGE_PLAN.md](TASK_LIST_CHANGE_PLAN.md) for the implemented interaction rules, data changes, acceptance checks, and proposed Windows release process. These features extend sections 3, 5, 6, 7, 9, and 14 and are present in the current working source.
+
+- Add an **Add task** button to the current task-list page. Immediately create/focus a blank, incomplete **Unassigned** task without a source section/subsection/page or source link. Persist task-list-created content independently of normal pages and historical list snapshots.
+- Copying a full standalone task/subtree into a normal page creates a linked placement and establishes that page as its source link, while retaining one logical task and synchronized content. Partial-text copies do not establish links. Fall back to a surviving notes placement when a linked page is deleted; omit the link if none remains.
+- Extend shared editing/clipboard/projection operations to standalone bullets and nullable source references. Use the version-2 document/backup format with migration/import support for version-1 notebooks; do not claim old applications can safely import the new standalone content. The SQLite JSON-document layout can remain unchanged.
+- The explicit Add task action creates a task; ordinary new outline bullets and Enter remain information bullets. Historical lists remain read-only.
+- Add a separate **Select tasks** mode with selection checkboxes, selected-card feedback/count, Ctrl-click toggling, inclusive anchored Shift-click ranges, Ctrl+Shift range union, and clearing. Keep completion checkboxes and rich-text selection independent.
+- Resolve card selection by logical identity and visible card order. Ranges run through Unassigned, then chronologically ordered Priority groups. Filter changes and navigation clear selection; hidden/stale tasks cannot be moved accidentally.
+- Move selected cards together by dragging a selected grip or using **Move selected**. Preserve their relative order, synchronize text dates across linked placements, keep source-page hierarchy/order intact, and commit the batch as one undoable update. Only explicitly selected child tasks change dates.
+- Model and actual Electron regression tests cover the new features. Repeat Windows packaging and smoke checks before distributing a Windows executable through a GitHub Release asset; a source/documentation update is not a compiled release.

@@ -1,4 +1,5 @@
 import {
+  contentContainers,
   type Notebook,
   type Page,
   type Bullet,
@@ -7,6 +8,7 @@ import {
   identity,
   uid,
   editPage,
+  updateBullet,
 } from "./model";
 import { sanitize } from "./rich";
 
@@ -155,7 +157,7 @@ export function pasteBullets(
   targetId: string | null,
   payload: BulletClipboard,
 ): { db: Notebook; focus: string } {
-  const page = db.pages.find((p) => p.id === pageId)!;
+  const page = contentContainers(db).find((p) => p.id === pageId)!;
   const target = page.bullets.find((b) => b.id === targetId);
   const same = !!db.notebookId && payload.notebookId === db.notebookId;
   let entries = payload.entries;
@@ -168,7 +170,7 @@ export function pasteBullets(
       const end = entries.findIndex((e, n) => n > i && e.depth <= entry.depth);
       const next = end < 0 ? entries.length : end;
       if (entry.linked && entry.bullet.kind === "task") {
-        const sourcePage = db.pages.find((p) =>
+        const sourcePage = contentContainers(db).find((p) =>
           p.bullets.some((b) => identity(b) === identity(entry.bullet)),
         );
         const source = sourcePage?.bullets.find(
@@ -224,7 +226,7 @@ export function pasteBullets(
     target &&
     !target.html.replace(/<[^>]+>/g, "").trim() &&
     !/<(img|table)\b/i.test(target.html);
-  const result = editPage(db, pageId, (p) => {
+  let result = editPage(db, pageId, (p) => {
     const bullets = [...p.bullets];
     const position = target
       ? bullets.findIndex((b) => b.id === target.id)
@@ -246,6 +248,8 @@ export function pasteBullets(
     } else bullets.splice(after, 0, ...inserted);
     return { ...p, bullets };
   });
+  for (const b of inserted)
+    result = updateBullet(result, b.id, (x) => x, pageId);
   // Pasting a cut task that had no remaining placements restores its membership.
   const taskKeys = inserted.filter((b) => b.kind === "task").map(identity);
   return {

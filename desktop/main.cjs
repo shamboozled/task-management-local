@@ -67,7 +67,8 @@ if (!app.requestSingleInstanceLock()) {
       handle("notebook:save", (value) => {
         if (
           !value ||
-          value.version !== 1 ||
+          ![1, 2].includes(value.version) ||
+          (value.version === 2 && !Array.isArray(value.taskListBullets)) ||
           !Array.isArray(value.pages) ||
           !Array.isArray(value.taskLists) ||
           !Array.isArray(value.customers) ||

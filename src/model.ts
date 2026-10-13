@@ -21,7 +21,7 @@ export type Customer = { id: string; name: string };
 export type Section = { id: string; customerId: string; name: string };
 export type Task = {
   bullet: Bullet;
-  pageId: string;
+  pageId: string | null;
   pageTitle: string;
   customerName: string;
   information: {
@@ -38,7 +38,8 @@ export type TaskList = {
   taskIds: string[];
 };
 export type Notebook = {
-  version: 1;
+  version: 1 | 2;
+  taskListBullets?: Bullet[];
   customers: Customer[];
   sections: Section[];
   pages: Page[];
@@ -65,7 +66,8 @@ export const newBullet = (parentId: string | null = null): Bullet => ({
 export function emptyNotebook(): Notebook {
   const id = uid();
   return {
-    version: 1,
+    version: 2,
+    taskListBullets: [],
     notebookId: uid(),
     customers: [],
     sections: [],
@@ -80,6 +82,46 @@ export function emptyNotebook(): Notebook {
       },
     ],
     activeListId: id,
+  };
+}
+// A container adapter reuses outline operations without creating a notes page.
+// Its ID is reserved and it is never saved in pages or exposed in navigation.
+export const taskListContainerId = "@task-list-content";
+export function contentContainers(db: Notebook): Page[] {
+  return [
+    ...db.pages,
+    {
+      id: taskListContainerId,
+      sectionId: "",
+      parentId: null,
+      title: "",
+      bullets: db.taskListBullets ?? [],
+    },
+  ];
+}
+function withContentContainers(db: Notebook, containers: Page[]): Notebook {
+  return {
+    ...db,
+    version: 2,
+    pages: containers.filter((p) => p.id !== taskListContainerId),
+    taskListBullets:
+      containers.find((p) => p.id === taskListContainerId)?.bullets ?? [],
+  };
+}
+export function createTask(db: Notebook): { db: Notebook; task: Bullet } {
+  const task: Bullet = { ...newBullet(), kind: "task" };
+  return {
+    task,
+    db: {
+      ...db,
+      version: 2,
+      taskListBullets: [...(db.taskListBullets ?? []), task],
+      taskLists: db.taskLists.map((l) =>
+        l.id === db.activeListId
+          ? { ...l, taskIds: [...l.taskIds, task.id] }
+          : l,
+      ),
+    },
   };
 }
 export function textOf(html: string) {
@@ -166,7 +208,7 @@ export function moveDate(
 export function tasksOf(db: Notebook): Task[] {
   const active = db.taskLists.find((l) => l.id === db.activeListId)!;
   const contextSources = new Map<string, Set<Page>>();
-  for (const page of db.pages) {
+  for (const page of contentContainers(db)) {
     for (const b of page.bullets) {
       if (b.kind !== "information" || !b.taskListContextId) continue;
       const sources =
@@ -181,7 +223,7 @@ export function tasksOf(db: Notebook): Task[] {
     return orderedPages.get(p.id)!;
   };
   const seen = new Set<string>();
-  return db.pages
+  return contentContainers(db)
     .flatMap((page) =>
       page.bullets
         .filter((b) => {
@@ -256,7 +298,7 @@ export function tasksOf(db: Notebook): Task[] {
           }
           return {
             bullet,
-            pageId: page.id,
+            pageId: page.id === taskListContainerId ? null : page.id,
             pageTitle: page.title,
             customerName,
             information,
@@ -276,16 +318,17 @@ export function updateBullet(
   fn: (b: Bullet) => Bullet,
   pageId?: string,
 ): Notebook {
-  const source = db.pages
+  const source = contentContainers(db)
     .flatMap((p) => p.bullets)
     .find((b) => b.id === id || identity(b) === id);
   if (!source) return db;
+  if (pageId === taskListContainerId) pageId = undefined;
   const key = identity(source);
   const next = fn(source);
   if (next.completed && !source.completed && !canComplete(db, source))
     return db;
   const ancestors = new Set<string>();
-  for (const page of db.pages)
+  for (const page of contentContainers(db))
     for (const placement of page.bullets.filter((b) => identity(b) === key)) {
       let parent = placement.parentId;
       while (parent) {
@@ -297,7 +340,7 @@ export function updateBullet(
     }
   const reopened = new Set<string>();
   let add = false;
-  const pages = db.pages.map((p) => ({
+  const pages = contentContainers(db).map((p) => ({
     ...p,
     bullets: p.bullets.map((b) => {
       if (identity(b) !== key) {
@@ -324,8 +367,7 @@ export function updateBullet(
     }),
   }));
   return {
-    ...db,
-    pages,
+    ...withContentContainers(db, pages),
     taskLists:
       add || reopened.size
         ? db.taskLists.map((l) =>
@@ -380,9 +422,11 @@ export function toggleBullet(b: Bullet): Bullet {
 export function validateBackup(value: unknown): Notebook {
   if (!value || typeof value !== "object")
     throw Error("Not a notebook backup.");
-  const d = value as Notebook;
+  const d = structuredClone(value) as Notebook;
   if (
-    d.version !== 1 ||
+    ![1, 2].includes(d.version) ||
+    (d.version === 2 && !Array.isArray(d.taskListBullets)) ||
+    (d.version === 1 && d.taskListBullets !== undefined) ||
     !Array.isArray(d.customers) ||
     !Array.isArray(d.sections) ||
     !Array.isArray(d.pages) ||
@@ -443,6 +487,7 @@ export function validateBackup(value: unknown): Notebook {
   });
   d.pages.forEach((p) => {
     check(p);
+    if (p.id === taskListContainerId) throw Error("Reserved page identifier.");
     if (
       typeof p.title !== "string" ||
       !(p.parentId === null || typeof p.parentId === "string") ||
@@ -450,6 +495,8 @@ export function validateBackup(value: unknown): Notebook {
       !d.sections.some((s) => s.id === p.sectionId)
     )
       throw Error("Invalid page.");
+  });
+  contentContainers(d).forEach((p) => {
     p.bullets.forEach((b) => {
       check(b);
       bullet(b);
@@ -500,7 +547,10 @@ export function validateBackup(value: unknown): Notebook {
     l.snapshot?.forEach((t) => {
       if (
         !t ||
-        typeof t.pageId !== "string" ||
+        !(
+          typeof t.pageId === "string" ||
+          (d.version === 2 && t.pageId === null)
+        ) ||
         typeof t.pageTitle !== "string" ||
         typeof t.customerName !== "string" ||
         !Array.isArray(t.information)
@@ -523,7 +573,7 @@ export function validateBackup(value: unknown): Notebook {
     d.taskLists.filter((l) => l.snapshot === null).length !== 1
   )
     throw Error("Invalid current task list.");
-  return d;
+  return { ...d, version: 2, taskListBullets: d.taskListBullets ?? [] };
 }
 
 // Keep legacy customers/sections keys so browser-version backup files remain importable.
@@ -608,7 +658,7 @@ export function descendants(page: Page, id: string): Bullet[] {
   return out;
 }
 export function canComplete(db: Notebook, bullet: Bullet): boolean {
-  return !db.pages.some((p) =>
+  return !contentContainers(db).some((p) =>
     p.bullets.some(
       (b) =>
         identity(b) === identity(bullet) &&
@@ -626,14 +676,18 @@ export function editPage(
   pageId: string,
   fn: (p: Page) => Page,
 ): Notebook {
-  const before = db.pages.find((p) => p.id === pageId);
-  let next = {
-    ...db,
-    pages: db.pages.map((p) => (p.id === pageId ? fn(p) : p)),
-  };
-  const source = next.pages.find((p) => p.id === pageId);
-  if (!source) return next;
-  if (source === before) return db;
+  const before = contentContainers(db).find((p) => p.id === pageId);
+  let next = withContentContainers(
+    db,
+    contentContainers(db).map((p) => (p.id === pageId ? fn(p) : p)),
+  );
+  const source = contentContainers(next).find((p) => p.id === pageId);
+  if (!before || !source) return db;
+  if (
+    source === before ||
+    (pageId === taskListContainerId && source.bullets === before.bullets)
+  )
+    return db;
   for (const b of source.bullets) {
     const seen = new Set([identity(b)]);
     let parent = b.parentId;
@@ -671,9 +725,9 @@ export function editPage(
     if (synchronized.has(identity(root))) continue;
     synchronized.add(identity(root));
     const children = descendants(source, root.id);
-    next = {
-      ...next,
-      pages: next.pages.map((p) => {
+    next = withContentContainers(
+      next,
+      contentContainers(next).map((p) => {
         // Snapshot targets before replacement: a page may contain multiple linked placements.
         const targets = p.bullets.filter(
           (b) => identity(b) === identity(root) && b.id !== root.id,
@@ -714,35 +768,38 @@ export function editPage(
         }
         return { ...p, bullets };
       }),
-    };
+    );
   }
   const activeIds = new Set(
     next.taskLists.find((l) => l.id === next.activeListId)!.taskIds,
   );
   const blocked = new Set(
-    next.pages
+    contentContainers(next)
       .flatMap((p) => p.bullets)
       .filter((b) => b.kind === "task" && b.completed && !canComplete(next, b))
       .map(identity),
   );
   if (blocked.size) {
-    next.pages = next.pages.map((p) => ({
-      ...p,
-      bullets: p.bullets.map((b) =>
-        blocked.has(identity(b)) ? { ...b, completed: false } : b,
-      ),
-    }));
+    next = withContentContainers(
+      next,
+      contentContainers(next).map((p) => ({
+        ...p,
+        bullets: p.bullets.map((b) =>
+          blocked.has(identity(b)) ? { ...b, completed: false } : b,
+        ),
+      })),
+    );
     blocked.forEach((id) => activeIds.add(id));
   }
   // A newly inserted/conversion task joins the current list; excluded completed
   // historical tasks do not rejoin merely because their page was edited.
   const oldTaskKeys = new Set(
-    db.pages
+    contentContainers(db)
       .flatMap((p) => p.bullets)
       .filter((b) => b.kind === "task")
       .map(identity),
   );
-  next.pages
+  contentContainers(next)
     .flatMap((p) => p.bullets)
     .filter((b) => b.kind === "task" && !oldTaskKeys.has(identity(b)))
     .forEach((b) => activeIds.add(identity(b)));
@@ -879,4 +936,43 @@ export function quickDate(
   if (which === "eow")
     date.setDate(date.getDate() + ((5 - date.getDay() + 7) % 7));
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+}
+
+// IDs are supplied in visible order. Resolve and change each logical task once.
+export function moveTasks(
+  db: Notebook,
+  ids: string[],
+  date: string | null,
+  targetId: string | null = null,
+  after = false,
+): Notebook {
+  const active = db.taskLists.find((l) => l.id === db.activeListId)!;
+  const live = tasksOf(db);
+  const selected = [...new Set(ids)].filter((id) =>
+    live.some((t) => identity(t.bullet) === id),
+  );
+  if (!selected.length || (targetId && selected.includes(targetId))) return db;
+  if (targetId && !live.some((t) => identity(t.bullet) === targetId)) return db;
+  let next = db;
+  for (const id of selected)
+    next = updateBullet(next, id, (b) => moveDate(b, date));
+  const remaining = active.taskIds.filter((id) => !selected.includes(id));
+  let position: number;
+  if (targetId) position = remaining.indexOf(targetId) + (after ? 1 : 0);
+  else {
+    const destination = tasksOf(next).filter(
+      (t) =>
+        t.bullet.dueDate === date && !selected.includes(identity(t.bullet)),
+    );
+    position = destination.length
+      ? remaining.indexOf(identity(destination.at(-1)!.bullet)) + 1
+      : remaining.length;
+  }
+  remaining.splice(position, 0, ...selected);
+  return {
+    ...next,
+    taskLists: next.taskLists.map((l) =>
+      l.id === db.activeListId ? { ...l, taskIds: remaining } : l,
+    ),
+  };
 }

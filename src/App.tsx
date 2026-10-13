@@ -46,7 +46,10 @@ import {
   descendants,
   canComplete,
   removeNavigation,
-  reorderTask,
+  contentContainers,
+  taskListContainerId,
+  createTask,
+  moveTasks,
   quickDate,
   textOf,
 } from "./model";
@@ -76,6 +79,20 @@ import PageSearchPanel from "./PageSearchPanel";
 import { highlightRanges, type SearchMatch } from "./pageSearch";
 const fullDate = (s: string) =>
   `${s.slice(5, 7)}/${s.slice(8, 10)}/${s.slice(0, 4)}`;
+function matchesTaskQuery(t: Task, query: string) {
+  return (
+    !query ||
+    [
+      t.bullet.html,
+      t.customerName,
+      t.pageTitle,
+      ...t.information.map((i) => i.bullet.html),
+    ]
+      .join(" ")
+      .toLowerCase()
+      .includes(query.toLowerCase())
+  );
+}
 function Tool({
   label,
   onClick,
@@ -112,6 +129,31 @@ export default function App() {
   const [query, setQuery] = useState(""),
     [sidebar, setSidebar] = useState(true),
     [extraDates, setExtraDates] = useState<string[]>([]);
+  const [selectingTasks, setSelectingTasks] = useState(false);
+  const [taskSelection, setTaskSelection] = useState<Set<string>>(new Set());
+  const [moveMenu, setMoveMenu] = useState(false);
+  const taskAnchor = useRef<string | null>(null);
+  const draggedTasks = useRef<string[]>([]);
+  const clearTaskSelection = () => {
+    setTaskSelection(new Set());
+    taskAnchor.current = null;
+    setMoveMenu(false);
+  };
+  useEffect(clearTaskSelection, [query, view?.id, db?.notebookId]);
+  useEffect(() => {
+    if (!db) return;
+    const live = new Set(
+      tasksOf(db)
+        .filter((t) => matchesTaskQuery(t, query))
+        .map((t) => identity(t.bullet)),
+    );
+    setTaskSelection((prior) => {
+      const retained = new Set([...prior].filter((id) => live.has(id)));
+      if (taskAnchor.current && !live.has(taskAnchor.current))
+        taskAnchor.current = null;
+      return retained.size === prior.size ? prior : retained;
+    });
+  }, [db, query]);
   const [pageSearchOpen, setPageSearchOpen] = useState(false);
   const pageSearchInput = useRef<HTMLInputElement>(null);
   const [searchTarget, setSearchTarget] = useState<{
@@ -307,6 +349,14 @@ export default function App() {
   };
   useEffect(() => {
     const key = (e: KeyboardEvent) => {
+      if (
+        e.key === "Escape" &&
+        !dialog &&
+        !(e.target as Element).closest(".page-search-panel")
+      ) {
+        clearTaskSelection();
+        return;
+      }
       if (dialog || !(e.ctrlKey || e.metaKey)) return;
       if (e.key.toLowerCase() === "f" && !e.shiftKey && !e.altKey) {
         e.preventDefault();
@@ -421,7 +471,7 @@ export default function App() {
     pendingDates.current.delete(id);
     const state = latest.current;
     if (!state) return;
-    const source = state.pages
+    const source = contentContainers(state)
       .flatMap((p) => p.bullets)
       .find((b) => b.id === id);
     if (!source) return;
@@ -434,8 +484,9 @@ export default function App() {
   };
   const editText = (id: string, html: string, pageId?: string) => {
     if (
-      latest.current?.pages.flatMap((p) => p.bullets).find((b) => b.id === id)
-        ?.html === html
+      (latest.current ? contentContainers(latest.current) : [])
+        .flatMap((p) => p.bullets)
+        .find((b) => b.id === id)?.html === html
     )
       return;
     pendingDates.current.add(id);
@@ -562,7 +613,7 @@ export default function App() {
         };
       });
       if (!contextId || next === d) return next;
-      const source = next.pages.find((p) => p.id === pageId)!;
+      const source = contentContainers(next).find((p) => p.id === pageId)!;
       const ancestors = new Set<string>();
       let parent = source.bullets.find((x) => x.id === b.id)?.parentId;
       while (parent) {
@@ -585,7 +636,9 @@ export default function App() {
     else if (el) setCaret(el, offset);
   };
   const remove = (pageId: string, b: Bullet) => {
-    const p = latest.current?.pages.find((p) => p.id === pageId);
+    const p =
+      latest.current &&
+      contentContainers(latest.current).find((p) => p.id === pageId);
     if (!p) return;
     const ordered = notesHost.current
       ? [...notesHost.current.querySelectorAll<HTMLDivElement>(".rich-editor")]
@@ -604,7 +657,10 @@ export default function App() {
     let fallback: string | null = prior ?? ordered[at + 1]?.bullet.id ?? null;
     change((d) => {
       let next = deleteBullets(d, pageId, [b.id]);
-      if (!next.pages.find((p) => p.id === pageId)!.bullets.length) {
+      if (
+        pageId !== taskListContainerId &&
+        !contentContainers(next).find((p) => p.id === pageId)!.bullets.length
+      ) {
         const empty = newBullet();
         fallback = empty.id;
         next = editPage(next, pageId, (p) => ({ ...p, bullets: [empty] }));
@@ -1139,7 +1195,7 @@ export default function App() {
       if (file.size > 100 * 1024 * 1024) throw Error("Backup exceeds 100 MB.");
       const data = validateBackup(JSON.parse(await file.text()));
       data.notebookId ??= uid();
-      data.pages.forEach((p) =>
+      contentContainers(data).forEach((p) =>
         p.bullets.forEach((b) => {
           b.html = sanitize(b.html);
         }),
@@ -1185,25 +1241,92 @@ export default function App() {
       : undefined;
   const readOnly = !!list?.snapshot;
   const allTasks = list?.snapshot ?? tasksOf(db);
-  const filtered = allTasks.filter(
-    (t) =>
-      !query ||
-      [
-        t.bullet.html,
-        t.customerName,
-        t.pageTitle,
-        ...t.information.map((i) => i.bullet.html),
-      ]
-        .join(" ")
-        .toLowerCase()
-        .includes(query.toLowerCase()),
-  );
+  const filtered = allTasks.filter((t) => matchesTaskQuery(t, query));
   const dates = [
     ...new Set([
       ...filtered.map((t) => t.bullet.dueDate).filter((d): d is string => !!d),
       ...(!readOnly ? extraDates : []),
     ]),
   ].sort();
+  const visibleTaskIds = [
+    ...filtered.filter((t) => !t.bullet.dueDate),
+    ...dates.flatMap((date) =>
+      filtered.filter((t) => t.bullet.dueDate === date),
+    ),
+  ].map((t) => identity(t.bullet));
+  const selectTask = (
+    id: string,
+    modifiers: { ctrlKey: boolean; shiftKey: boolean; metaKey?: boolean },
+  ) => {
+    if (readOnly) return;
+    setSelectingTasks(true);
+    setTaskSelection((prior) => {
+      if (
+        modifiers.shiftKey &&
+        taskAnchor.current &&
+        visibleTaskIds.includes(taskAnchor.current)
+      ) {
+        const a = visibleTaskIds.indexOf(taskAnchor.current),
+          b = visibleTaskIds.indexOf(id);
+        const range = visibleTaskIds.slice(Math.min(a, b), Math.max(a, b) + 1);
+        return new Set([
+          ...(modifiers.ctrlKey || modifiers.metaKey ? prior : []),
+          ...range,
+        ]);
+      }
+      taskAnchor.current = id;
+      if (modifiers.ctrlKey || modifiers.metaKey) {
+        const next = new Set(prior);
+        if (next.has(id)) next.delete(id);
+        else next.add(id);
+        return next;
+      }
+      return new Set([id]);
+    });
+  };
+  const applyTaskMove = (
+    ids: string[],
+    date: string | null,
+    target: string | null = null,
+    after = false,
+  ) => {
+    if (readOnly) return;
+    change((d) => {
+      let next = d;
+      for (const id of pendingDates.current)
+        next = updateBullet(next, id, (b) => editBullet(b, b.html));
+      pendingDates.current.clear();
+      return moveTasks(next, ids, date, target, after);
+    });
+    setMoveMenu(false);
+  };
+  const selectedTaskIds = () =>
+    visibleTaskIds.filter((id) => taskSelection.has(id));
+  const addTask = () => {
+    if (readOnly) return;
+    let id = "";
+    change((d) => {
+      const result = createTask(d);
+      id = result.task.id;
+      return result.db;
+    });
+    setQuery("");
+    clearTaskSelection();
+    focusCard.current = id;
+    focus(id, 0);
+    requestAnimationFrame(() =>
+      document
+        .querySelector(`[data-task-context="${id}"]`)
+        ?.scrollIntoView({ block: "nearest" }),
+    );
+  };
+  const readDraggedTasks = (e: React.DragEvent) => {
+    const id = e.dataTransfer.getData("text/plain");
+    if (!visibleTaskIds.includes(id)) return [];
+    return draggedTasks.current.includes(id)
+      ? draggedTasks.current.filter((key) => visibleTaskIds.includes(key))
+      : [id];
+  };
   const section = page
     ? db.sections.find((s) => s.id === page.sectionId)
     : undefined;
@@ -1215,7 +1338,7 @@ export default function App() {
     const seen = new Set<string>();
     change((d) =>
       (ids.length > 1 ? ids : [b.id]).reduce((next, id) => {
-        const source = d.pages
+        const source = contentContainers(d)
           .flatMap((p) => p.bullets)
           .find((b) => b.id === id)!;
         if (seen.has(identity(source))) return next;
@@ -1237,7 +1360,7 @@ export default function App() {
       },
     }));
   const hasChildren = (b: Bullet) =>
-    db.pages.some((p) =>
+    contentContainers(db).some((p) =>
       p.bullets.some(
         (x) =>
           identity(x) === identity(b) &&
@@ -1342,9 +1465,11 @@ export default function App() {
       !((e.target as Element).closest("td,th") || selectedCell())
     ) {
       e.preventDefault();
-      const source = latest.current?.pages.find((p) =>
-        p.bullets.some((x) => x.id === b.id),
-      );
+      const source =
+        latest.current &&
+        contentContainers(latest.current).find((p) =>
+          p.bullets.some((x) => x.id === b.id),
+        );
       const context = e.currentTarget.closest<HTMLElement>(
         "[data-task-context]",
       )?.dataset.taskContext;
@@ -1357,9 +1482,11 @@ export default function App() {
       !selectedCell()
     ) {
       e.preventDefault();
-      const source = latest.current?.pages.find((p) =>
-        p.bullets.some((x) => x.id === b.id),
-      );
+      const source =
+        latest.current &&
+        contentContainers(latest.current).find((p) =>
+          p.bullets.some((x) => x.id === b.id),
+        );
       const context = e.currentTarget.closest<HTMLElement>(
         "[data-task-context]",
       )?.dataset.taskContext;
@@ -1434,7 +1561,7 @@ export default function App() {
         onChange={(html) => {
           if (!readOnly && !inherited) {
             if (isBlank(html) && !isBlank(b.html)) {
-              const source = db.pages.find((p) =>
+              const source = contentContainers(db).find((p) =>
                 p.bullets.some((x) => x.id === b.id),
               );
               if (source) remove(source.id, b);
@@ -1525,7 +1652,19 @@ export default function App() {
   const taskCard = (task: Task) => (
     <article
       key={task.bullet.id}
-      className="task-card"
+      className={`task-card ${taskSelection.has(identity(task.bullet)) && !readOnly ? "task-card-selected" : ""}`}
+      onClick={(e) => {
+        if (
+          (e.target as Element).closest(
+            "button,input,a,.rich-editor,[draggable]",
+          )
+        )
+          return;
+        if (selectingTasks || e.ctrlKey || e.metaKey || e.shiftKey) {
+          e.preventDefault();
+          selectTask(identity(task.bullet), e);
+        }
+      }}
       data-task={task.bullet.id}
       data-task-context={identity(task.bullet)}
       onDragOver={(e) => {
@@ -1538,28 +1677,61 @@ export default function App() {
         if (readOnly) return;
         e.preventDefault();
         e.stopPropagation();
-        const id = e.dataTransfer.getData("text/plain");
-        const source = tasksOf(db).find((t) => identity(t.bullet) === id);
-        if (!source) return;
-        change((d) =>
-          reorderTask(
-            updateBullet(d, id, (b) => moveDate(b, task.bullet.dueDate)),
-            id,
-            identity(task.bullet),
-            e.clientY >
-              e.currentTarget.getBoundingClientRect().top +
-                e.currentTarget.getBoundingClientRect().height / 2,
-          ),
+        applyTaskMove(
+          readDraggedTasks(e),
+          task.bullet.dueDate,
+          identity(task.bullet),
+          e.clientY >
+            e.currentTarget.getBoundingClientRect().top +
+              e.currentTarget.getBoundingClientRect().height / 2,
         );
       }}
     >
       <div className="task-source">
+        {selectingTasks && !readOnly && (
+          <label className="task-selection-control">
+            <input
+              type="checkbox"
+              aria-label="Select task"
+              checked={taskSelection.has(identity(task.bullet))}
+              onChange={() =>
+                selectTask(identity(task.bullet), {
+                  ctrlKey: true,
+                  shiftKey: false,
+                })
+              }
+            />
+            <span>Select</span>
+          </label>
+        )}
         {!readOnly && (
           <span
             draggable
-            onDragStart={(e) =>
-              e.dataTransfer.setData("text/plain", identity(task.bullet))
-            }
+            onDragStart={(e) => {
+              const id = identity(task.bullet);
+              draggedTasks.current = taskSelection.has(id)
+                ? selectedTaskIds()
+                : [id];
+              if (!taskSelection.has(id)) {
+                setTaskSelection(new Set([id]));
+                taskAnchor.current = id;
+              }
+              e.dataTransfer.effectAllowed = "move";
+              e.dataTransfer.setData("text/plain", id);
+              e.dataTransfer.setData(
+                "application/x-task-notebook-move-count",
+                String(draggedTasks.current.length),
+              );
+              const badge = document.createElement("div");
+              badge.className = "task-drag-badge";
+              badge.textContent = `${draggedTasks.current.length} task${draggedTasks.current.length === 1 ? "" : "s"}`;
+              document.body.append(badge);
+              e.dataTransfer.setDragImage(badge, 0, 0);
+              setTimeout(() => badge.remove(), 0);
+            }}
+            onDragEnd={() => {
+              draggedTasks.current = [];
+            }}
             className="drag-handle"
             title="Drag to a date group or Unassigned"
           >
@@ -1567,30 +1739,32 @@ export default function App() {
           </span>
         )}
         <span>{task.customerName}</span>
-        <button
-          disabled={!db.pages.some((p) => p.id === task.pageId)}
-          title={
-            !db.pages.some((p) => p.id === task.pageId)
-              ? "This source page was deleted; the historical snapshot is preserved."
-              : "Open source page"
-          }
-          onClick={() => {
-            setView({ type: "page", id: task.pageId });
-            setQuery("");
-            setTimeout(
-              () =>
-                document
-                  .querySelector<HTMLElement>(
-                    `[data-bullet="${task.bullet.id}"]`,
-                  )
-                  ?.scrollIntoView({ behavior: "smooth", block: "center" }),
-              50,
-            );
-          }}
-        >
-          {task.pageTitle}
-          <ArrowUpRight size={13} />
-        </button>
+        {task.pageId !== null && (
+          <button
+            disabled={!db.pages.some((p) => p.id === task.pageId)}
+            title={
+              !db.pages.some((p) => p.id === task.pageId)
+                ? "This source page was deleted; the historical snapshot is preserved."
+                : "Open source page"
+            }
+            onClick={() => {
+              setView({ type: "page", id: task.pageId! });
+              setQuery("");
+              setTimeout(
+                () =>
+                  document
+                    .querySelector<HTMLElement>(
+                      `[data-bullet="${task.bullet.id}"]`,
+                    )
+                    ?.scrollIntoView({ behavior: "smooth", block: "center" }),
+                50,
+              );
+            }}
+          >
+            {task.pageTitle}
+            <ArrowUpRight size={13} />
+          </button>
+        )}
       </div>
       {renderTaskInformation(task, "before")}
       {renderBullet(task.bullet)}
@@ -1643,15 +1817,15 @@ export default function App() {
   const drop = (e: React.DragEvent, date: string | null) => {
     e.preventDefault();
     if (readOnly) return;
-    const id = e.dataTransfer.getData("text/plain");
-    if (!tasksOf(db).some((t) => identity(t.bullet) === id)) return;
-    patch(id, (b) => moveDate(b, date));
+    applyTaskMove(readDraggedTasks(e), date);
   };
   const taskSelectionGroups = (els: HTMLDivElement[]) => {
     const groups = new Map<string, Set<string>>();
     for (const el of els) {
       const id = el.closest<HTMLElement>("[data-bullet]")!.dataset.bullet!;
-      const source = db.pages.find((p) => p.bullets.some((b) => b.id === id));
+      const source = contentContainers(db).find((p) =>
+        p.bullets.some((b) => b.id === id),
+      );
       if (!source) continue;
       const ids = groups.get(source.id) ?? new Set<string>();
       ids.add(id);
@@ -1671,7 +1845,10 @@ export default function App() {
       let next = d;
       for (const [pageId, ids] of selected) {
         next = deleteBullets(next, pageId, [...ids], cut);
-        if (!next.pages.find((p) => p.id === pageId)!.bullets.length)
+        if (
+          pageId !== taskListContainerId &&
+          !contentContainers(next).find((p) => p.id === pageId)!.bullets.length
+        )
           next = editPage(next, pageId, (p) => ({
             ...p,
             bullets: [newBullet()],
@@ -1703,7 +1880,7 @@ export default function App() {
         ([id, ids]) =>
           copyBullets(
             db,
-            db.pages.find((p) => p.id === id)!,
+            contentContainers(db).find((p) => p.id === id)!,
             [...ids],
           ).entries,
       ),
@@ -2112,6 +2289,86 @@ export default function App() {
                   />
                 </div>
               </div>
+              {!readOnly && (
+                <div className="task-list-actions">
+                  <button className="button primary" onClick={addTask}>
+                    <Plus size={16} />
+                    Add task
+                  </button>
+                  <button
+                    className="button secondary"
+                    aria-pressed={selectingTasks}
+                    onClick={() => {
+                      setSelectingTasks(!selectingTasks);
+                      clearTaskSelection();
+                    }}
+                  >
+                    Select tasks
+                  </button>
+                  {selectingTasks && (
+                    <>
+                      <span role="status" aria-live="polite">
+                        {taskSelection.size} selected
+                      </span>
+                      <button
+                        className="button secondary"
+                        disabled={!taskSelection.size}
+                        aria-expanded={moveMenu}
+                        onClick={() => setMoveMenu(!moveMenu)}
+                      >
+                        Move selected
+                      </button>
+                      <button
+                        className="button secondary"
+                        disabled={!taskSelection.size}
+                        onClick={clearTaskSelection}
+                      >
+                        Clear selection
+                      </button>
+                    </>
+                  )}
+                  {moveMenu && (
+                    <div
+                      className="task-move-options"
+                      role="group"
+                      aria-label="Move selected tasks"
+                    >
+                      <button
+                        onClick={() => applyTaskMove(selectedTaskIds(), null)}
+                      >
+                        Unassigned
+                      </button>
+                      {(
+                        [
+                          ["today", "Today"],
+                          ["tomorrow", "Tomorrow"],
+                          ["eow", "EOW"],
+                        ] as const
+                      ).map(([which, label]) => (
+                        <button
+                          key={which}
+                          onClick={() =>
+                            applyTaskMove(selectedTaskIds(), quickDate(which))
+                          }
+                        >
+                          {label}
+                        </button>
+                      ))}
+                      <label>
+                        Move to date
+                        <input
+                          type="date"
+                          aria-label="Move selected to date"
+                          onChange={(e) => {
+                            if (e.target.value)
+                              applyTaskMove(selectedTaskIds(), e.target.value);
+                          }}
+                        />
+                      </label>
+                    </div>
+                  )}
+                </div>
+              )}
               {readOnly && (
                 <div className="snapshot-banner">
                   <Archive size={16} />
@@ -2146,8 +2403,8 @@ export default function App() {
                       <ListTodo size={25} />
                       <h3>A place for the next step</h3>
                       <p>
-                        Tasks without dates appear here. Add one in your section
-                        notes.
+                        Tasks without dates appear here. Click Add task to
+                        create one, or turn a bullet in your notes into a task.
                       </p>
                     </div>
                   )}

@@ -1308,3 +1308,61 @@ kbd {
     padding: 0 20px;
   }
 }
+
+.task-list-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 20px;
+}
+.task-card-selected {
+  border-color: #287358;
+  box-shadow: 0 0 0 2px #28735833;
+  background: #f4faf6;
+}
+.task-selection-control {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: #287358;
+  font-size: 12px;
+  cursor: pointer;
+}
+.task-selection-control input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+}
+.task-move-options {
+  flex-basis: 100%;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid #d6e2d6;
+  border-radius: 8px;
+  background: #f4faf6;
+}
+.task-move-options button {
+  padding: 6px 10px;
+  border: 1px solid #d6e2d6;
+  border-radius: 5px;
+  background: #fff;
+}
+.task-move-options label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.task-drag-badge {
+  position: fixed;
+  top: 0;
+  left: 0;
+  padding: 10px 16px;
+  border-radius: 6px;
+  background: #287358;
+  color: #fff;
+  pointer-events: none;
+}

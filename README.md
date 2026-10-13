@@ -32,6 +32,14 @@ Alternatively, download the repository using GitHub’s **Code → Download ZIP*
 
 **Validation:** the interface build, SQLite tests, and actual Electron desktop workflows are tested in Linux in this cloud workspace. A Windows executable has not been built or run here. The Windows command and electron-builder configuration above are provided for compiling on Windows; no native SQLite dependency or C++ build toolchain is required.
 
+## Share the executable on GitHub
+
+The simplest distribution method is to build on Windows with `npm ci` and `npm run dist:win`, then attach `release\Task-Notebook-1.0.0-Windows-x64.exe` to a **GitHub Release** in this repository. Use **Releases → Draft a new release**, tag the source commit you built, upload the executable, and publish after testing it. Keep generated binaries out of source history; `release/` is already ignored.
+
+The portable executable bundles its runtime and targets **Windows 10/11 x64**. Users do not need Node.js, Git, or an installed browser. Compatibility with every x64 Windows machine is not guaranteed; older Windows versions and restrictive application policies can prevent it from running. The current executable is unsigned and may trigger SmartScreen. Build and test on Windows before claiming Windows support; Linux tests do not validate the Windows artifact.
+
+For an automation follow-up, use a Windows GitHub Actions runner to build a downloadable artifact, then attach reviewed versioned builds to GitHub Releases. See [the distribution plan](TASK_LIST_CHANGE_PLAN.md#5-distribute-a-compiled-windows-executable-through-github).
+
 ## Run from source
 
 ```powershell
@@ -65,6 +73,8 @@ For Linux development, the equivalent folder is `$XDG_CONFIG_HOME/Task Notebook`
 
 Use **Export backup** in the sidebar to choose a location for a `.json` file containing the complete notebook. **Restore backup** selects a JSON backup, validates it, asks before replacing your notebook, and creates a safety copy first. Existing browser-version exports are supported; no changes to the browser repository are needed.
 
+This version saves and exports **version-2** notebook documents so tasks can exist without source pages. Existing version-1 browser/desktop notebooks and backups migrate when opened or restored. Older app versions cannot open the new format; export a backup before upgrading and keep a copy of your previous database if you need to return to an older build.
+
 To move existing notes: open the original browser app, export a backup, then open this desktop app and restore that file. The legacy `customers` and `sections` keys remain in the backup schema for compatibility; the desktop interface displays them as **Sections** and **Subsections**.
 
 If you need to restore an automatic SQLite backup:
@@ -80,7 +90,7 @@ If you need to restore an automatic SQLite backup:
 - Click section and subsection names to collapse/expand them. Collapse state and ordering are saved. Pencil icons rename items; plus icons add subsections and pages.
 - Drag a section by its grip onto another section to place it before that section. Drag a subsection onto another subsection to place it before that item, or onto a section heading to move it to that section. Its pages/subpages move with it.
 - Page and subpage names default to the local current date in `MM/DD/YYYY` format. Names are editable. The breadcrumb shows the section, subsection, and the entire page/subpage path; ancestor page names are clickable.
-- Every bullet defaults to information. Use its toggle or **Ctrl+T** to make it a task. In notes pages and the task list, **Enter** creates an information bullet at the same indent, splitting text at the caret (or inserting above at the start). Information created beside a task in the task list remains visible on its card and source page. **Shift+Enter** inserts a line. A second Enter on the new blank bullet outdents it, or creates a child if already at the top level. In both views, **Tab / Shift+Tab** indent/outdent while preserving the caret. In the task list, indenting into a collapsed task reveals its children so you can keep typing. Up/down arrows move between bullets.
+- New outline bullets default to information; **Add task** on the current task list explicitly creates a task. Use a bullet's toggle or **Ctrl+T** to make it a task. In notes pages and the task list, **Enter** creates an information bullet at the same indent, splitting text at the caret (or inserting above at the start). Information created beside a task in the task list remains visible on its card and source page. **Shift+Enter** inserts a line. A second Enter on the new blank bullet outdents it, or creates a child if already at the top level. In both views, **Tab / Shift+Tab** indent/outdent while preserving the caret. In the task list, indenting into a collapsed task reveals its children so you can keep typing. Up/down arrows move between bullets.
 - Information bullets support images and editable tables. Use the toolbar, click a table cell to change rows/columns, or paste images. Images support PNG/JPEG/GIF/WebP up to 10 MB each.
 - Pasting preserves safe hyperlinks and structure but normalizes fonts and sizes to **Calibri 12 pt**, with a fallback when Calibri is unavailable. Remote image references are omitted; insert the image itself to keep it locally.
 - Paste a URL or type one and leave the bullet to make it clickable. The **Insert hyperlink** toolbar button can turn selected text into a link. Click a hyperlink to open it in your default browser.
@@ -95,6 +105,16 @@ If you need to restore an automatic SQLite backup:
 - Deleting a bullet has no confirmation popup. Clearing its line removes it and promotes its children to the deleted parent's level. Sections, subsections, and pages have delete controls; deleting a containing location preserves linked tasks in other locations. Page grips support reordering and moving between subsections.
 - Collapse a task to hide its children while keeping its own text visible. A parent task cannot be completed while it has unfinished child tasks. Task-list grips also reorder tasks within a date group or the Unassigned column. EOW uses Friday, or next Friday after it has passed.
 - Task-list titles also default to the current date and can be renamed, including historical page titles. Creating a new list freezes the old contents and carries forward unfinished tasks in both columns, with dates and information intact. Completed tasks stay in notes/history and are excluded from the new list. Reopening a source task returns it to the current list.
+
+## Create and move tasks on the task list
+
+Click **Add task** on the current task list to create a blank **Unassigned** task and start typing immediately. No section, subsection, or source page is created. Blank tasks persist until you delete them or undo creation. Standalone tasks have no source link; copying the full task into a normal notes page creates a linked placement, establishes that page as the source link, and keeps both views synchronized. Partial-text copies remain ordinary text.
+
+Click **Select tasks** to reveal selection checkboxes, which are separate from completion checkboxes. **Ctrl + left-click** a card's noninteractive surface to add/remove that task; **Shift + left-click** selects the inclusive range from the anchor to that card. Ctrl+Shift adds a range to the existing selection. A plain card click in selection mode selects just that card. Editors, source links, completion controls, and date inputs retain their normal behavior.
+
+Ranges follow visible cards: Unassigned from top to bottom, then Priority date groups in chronological order. Drag a selected card's grip to move the selected cards as one ordered block. Drop before/after another card or onto a date group/Unassigned. You can also use **Move selected** to choose Unassigned, Today, Tomorrow, EOW, or a specific date. The entire move is one undo step and synchronizes dates with linked notes. Only explicitly selected child tasks are rescheduled.
+
+**Clear selection** or Escape clears the selection; changing the search or navigating clears it too. Selection checkboxes support Space, and Move selected provides a keyboard alternative to dragging. Historical task lists remain frozen and offer neither creation nor selection/move controls. See [the feature specification and implementation notes](TASK_LIST_CHANGE_PLAN.md).
 
 ## Development checks
 
