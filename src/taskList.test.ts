@@ -16,7 +16,7 @@ import {
   removeNavigation,
   deleteBullets,
 } from "./model";
-import { copyBullets, pasteBullets } from "./clipboard";
+import { copyBullets, copyTasks, pasteBullets } from "./clipboard";
 
 function fixture() {
   let db = emptyNotebook();
@@ -238,5 +238,58 @@ describe("moving logical tasks together", () => {
       tasksOf(db).find((t) => identity(t.bullet) === ids[0])!.information[0]
         .bullet.parentId,
     ).toBe(ids[0]);
+  });
+});
+
+describe("copying selected logical tasks", () => {
+  it("preserves display order, task types, information, and links when pasted into notes", () => {
+    let { db, ids } = fixture();
+    db = editPage(db, taskListContainerId, (p) => ({
+      ...p,
+      bullets: [
+        ...p.bullets,
+        { ...newBullet(ids[0]), id: "attached", html: "Attached information" },
+      ],
+    }));
+    const payload = copyTasks(db, [ids[2], ids[0], ids[2], "deleted-task"]);
+    expect(
+      payload.entries.map((e) => [identity(e.bullet), e.bullet.kind, e.depth]),
+    ).toEqual([
+      [ids[2], "task", 0],
+      [ids[0], "task", 0],
+      ["attached", "information", 1],
+    ]);
+    db = pasteBullets(db, "p", "blank", payload).db;
+    expect(db.pages[0].bullets.map((b) => [b.html, b.kind])).toEqual([
+      ["Gamma", "task"],
+      ["Alpha", "task"],
+      ["Attached information", "information"],
+    ]);
+    expect(tasksOf(db)).toHaveLength(4);
+    db = updateBullet(
+      db,
+      db.pages[0].bullets[0].id,
+      (b) => ({ ...b, html: "Edited copy" }),
+      "p",
+    );
+    expect(db.taskListBullets!.find((b) => b.id === ids[2])!.html).toBe(
+      "Edited copy",
+    );
+  });
+  it("includes selected descendants only within their selected ancestor subtree", () => {
+    let { db, ids } = fixture();
+    db = editPage(db, taskListContainerId, (p) => ({
+      ...p,
+      bullets: p.bullets.map((b) =>
+        b.id === ids[1] ? { ...b, parentId: ids[0] } : b,
+      ),
+    }));
+    const payload = copyTasks(db, [ids[1], ids[0], ids[2]]);
+    expect(payload.entries.map((e) => [identity(e.bullet), e.depth])).toEqual([
+      [ids[0], 0],
+      [ids[1], 1],
+      [ids[2], 0],
+    ]);
+    expect(copyTasks(db, ["stale"]).entries).toEqual([]);
   });
 });

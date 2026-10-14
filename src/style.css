@@ -1329,11 +1329,6 @@ kbd {
   font-size: 12px;
   cursor: pointer;
 }
-.task-selection-control input {
-  width: 16px;
-  height: 16px;
-  margin: 0;
-}
 .task-move-options {
   flex-basis: 100%;
   display: flex;
@@ -1365,4 +1360,88 @@ kbd {
   background: #287358;
   color: #fff;
   pointer-events: none;
+}
+
+.task-card-focused {
+  border-color: #287358;
+  box-shadow: 0 0 0 2px #28735833;
+}
+.task-source .task-selection-control {
+  margin-left: 0;
+  gap: 5px;
+  color: #287358;
+  font-size: 12px;
+  padding: 3px 5px;
+  border: 1px solid #c9d8ca;
+  border-radius: 4px;
+  background: #fff;
+}
+.task-source .task-selection-control[aria-pressed="true"] {
+  background: #e0f0e6;
+  border-color: #287358;
+}
+.task-context-menu {
+  position: fixed;
+  z-index: 110;
+  min-width: 210px;
+  padding: 6px;
+  border: 1px solid #c9d8ca;
+  border-radius: 8px;
+  background: #fff;
+  box-shadow: 0 6px 24px #243c2733;
+}
+.task-context-count {
+  padding: 7px 10px;
+  font-size: 12px;
+  color: #687a62;
+}
+.task-context-menu button {
+  display: block;
+  width: 100%;
+  padding: 9px 10px;
+  border-radius: 4px;
+  text-align: left;
+}
+.task-context-menu button:hover,
+.task-context-menu button:focus-visible {
+  background: #edf5ee;
+}
+.task-date-dialog {
+  max-height: calc(100vh - 32px);
+  overflow-y: auto;
+}
+.task-calendar-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin: 16px 0 8px;
+  font-weight: 600;
+}
+.task-calendar-heading button {
+  padding: 4px 12px;
+  font-size: 24px;
+}
+.task-calendar {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 4px;
+}
+.task-calendar-weekday {
+  text-align: center;
+  font-size: 12px;
+  color: #687a62;
+  padding: 5px 0;
+}
+.task-calendar button {
+  min-height: 34px;
+  border-radius: 5px;
+  background: #f2f6ef;
+}
+.task-calendar button:hover,
+.task-calendar button[aria-pressed="true"] {
+  background: #287358;
+  color: #fff;
+}
+.task-calendar button[aria-current="date"] {
+  box-shadow: inset 0 0 0 1px #287358;
 }

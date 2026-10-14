@@ -1,5 +1,6 @@
 const { contextBridge, ipcRenderer } = require("electron");
 contextBridge.exposeInMainWorld("notebookDesktop", {
+  copy: (content) => ipcRenderer.invoke("notebook:copy", content),
   load: () => ipcRenderer.invoke("notebook:load"),
   export: (state) => ipcRenderer.invoke("notebook:export", state),
   save: (state) => ipcRenderer.invoke("notebook:save", state),

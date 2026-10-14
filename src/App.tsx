@@ -3,6 +3,7 @@ import {
   BookOpen,
   Check,
   CheckSquare,
+  Square,
   ChevronRight,
   Download,
   ImagePlus,
@@ -57,6 +58,7 @@ import { load, save, flush } from "./storage";
 import { sanitize, tableHtml, imageHtml, plainHtml, linkify } from "./rich";
 import {
   copyBullets,
+  copyTasks,
   pasteBullets,
   readBulletClipboard,
   clipboardHtml,
@@ -75,6 +77,7 @@ import {
 } from "./selection";
 import Editor from "./Editor";
 import SidebarTree from "./SidebarTree";
+import { TaskContextMenu, TaskDateDialog } from "./TaskActions";
 import PageSearchPanel from "./PageSearchPanel";
 import { highlightRanges, type SearchMatch } from "./pageSearch";
 const fullDate = (s: string) =>
@@ -129,7 +132,14 @@ export default function App() {
   const [query, setQuery] = useState(""),
     [sidebar, setSidebar] = useState(true),
     [extraDates, setExtraDates] = useState<string[]>([]);
-  const [selectingTasks, setSelectingTasks] = useState(false);
+  const [activeTask, setActiveTask] = useState<string | null>(null);
+  const [taskContextMenu, setTaskContextMenu] = useState<{
+    x: number;
+    y: number;
+    ids: string[];
+  } | null>(null);
+  const [dateTasks, setDateTasks] = useState<string[] | null>(null);
+  const taskShortcuts = useRef<(e: KeyboardEvent) => boolean>(() => false);
   const [taskSelection, setTaskSelection] = useState<Set<string>>(new Set());
   const [moveMenu, setMoveMenu] = useState(false);
   const taskAnchor = useRef<string | null>(null);
@@ -138,7 +148,10 @@ export default function App() {
     setTaskSelection(new Set());
     taskAnchor.current = null;
     setMoveMenu(false);
+    setTaskContextMenu(null);
+    setDateTasks(null);
   };
+  useEffect(() => setActiveTask(null), [view?.id]);
   useEffect(clearTaskSelection, [query, view?.id, db?.notebookId]);
   useEffect(() => {
     if (!db) return;
@@ -154,6 +167,65 @@ export default function App() {
       return retained.size === prior.size ? prior : retained;
     });
   }, [db, query]);
+  useEffect(() => {
+    const outside = (e: PointerEvent) => {
+      if (e.button !== 0 || view?.type !== "tasks") return;
+      const target = e.target as Element;
+      if (
+        target.closest(
+          ".task-list-actions button,.task-list-actions input,.task-move-options,.task-context-menu,.task-date-dialog",
+        )
+      )
+        return;
+      const card = target.closest<HTMLElement>("[data-task-context]");
+      if (!card) {
+        clearTaskSelection();
+        setActiveTask(null);
+      } else if (
+        !target.closest(".task-selection-control") &&
+        !taskSelection.has(card.dataset.taskContext!)
+      ) {
+        clearTaskSelection();
+      }
+    };
+    const wheel = (e: WheelEvent) => {
+      const target = e.target as Element;
+      if (
+        !e.shiftKey ||
+        view?.type !== "tasks" ||
+        !target.closest("main") ||
+        target.closest(".task-date-dialog")
+      )
+        return;
+      const delta =
+        (e.deltaY || e.deltaX) *
+        (e.deltaMode === 1 ? 24 : e.deltaMode === 2 ? window.innerHeight : 1);
+      if (!delta) return;
+      e.preventDefault();
+      let scrollable =
+        target instanceof HTMLElement ? target : target.parentElement;
+      while (scrollable && scrollable !== document.body) {
+        if (
+          /(auto|scroll)/.test(getComputedStyle(scrollable).overflowY) &&
+          scrollable.scrollHeight > scrollable.clientHeight
+        ) {
+          scrollable.scrollBy({ top: delta });
+          return;
+        }
+        scrollable = scrollable.parentElement;
+      }
+      window.scrollBy({ top: delta });
+    };
+    const dismissMenu = () => setTaskContextMenu(null);
+    document.addEventListener("pointerdown", outside);
+    document.addEventListener("wheel", wheel, { passive: false });
+    window.addEventListener("scroll", dismissMenu, true);
+    return () => {
+      document.removeEventListener("pointerdown", outside);
+      document.removeEventListener("wheel", wheel);
+      window.removeEventListener("scroll", dismissMenu, true);
+    };
+  });
   const [pageSearchOpen, setPageSearchOpen] = useState(false);
   const pageSearchInput = useRef<HTMLInputElement>(null);
   const [searchTarget, setSearchTarget] = useState<{
@@ -349,6 +421,14 @@ export default function App() {
   };
   useEffect(() => {
     const key = (e: KeyboardEvent) => {
+      if (dateTasks || taskContextMenu) {
+        if (e.key === "Escape") {
+          e.preventDefault();
+          setDateTasks(null);
+          setTaskContextMenu(null);
+        }
+        return;
+      }
       if (
         e.key === "Escape" &&
         !dialog &&
@@ -358,6 +438,11 @@ export default function App() {
         return;
       }
       if (dialog || !(e.ctrlKey || e.metaKey)) return;
+      if (taskShortcuts.current(e)) {
+        e.preventDefault();
+        e.stopPropagation();
+        return;
+      }
       if (e.key.toLowerCase() === "f" && !e.shiftKey && !e.altKey) {
         e.preventDefault();
         e.stopPropagation();
@@ -1254,34 +1339,36 @@ export default function App() {
       filtered.filter((t) => t.bullet.dueDate === date),
     ),
   ].map((t) => identity(t.bullet));
-  const selectTask = (
-    id: string,
-    modifiers: { ctrlKey: boolean; shiftKey: boolean; metaKey?: boolean },
-  ) => {
+  const selectTask = (id: string, shiftKey: boolean) => {
     if (readOnly) return;
-    setSelectingTasks(true);
+    setActiveTask(null);
+    const anchor = taskAnchor.current;
+    const targetTask = filtered.find((t) => identity(t.bullet) === id);
+    if (!targetTask) return;
+    const inColumn = new Set(
+      filtered
+        .filter((t) => !!t.bullet.dueDate === !!targetTask.bullet.dueDate)
+        .map((t) => identity(t.bullet)),
+    );
+    const column = visibleTaskIds.filter((key) => inColumn.has(key));
+    if (shiftKey && anchor && column.includes(anchor)) {
+      const a = column.indexOf(anchor),
+        b = column.indexOf(id);
+      const range = column.slice(Math.min(a, b), Math.max(a, b) + 1);
+      setTaskSelection(
+        (prior) =>
+          new Set(
+            [...prior].filter((key) => !column.includes(key)).concat(range),
+          ),
+      );
+      return;
+    }
+    taskAnchor.current = id;
     setTaskSelection((prior) => {
-      if (
-        modifiers.shiftKey &&
-        taskAnchor.current &&
-        visibleTaskIds.includes(taskAnchor.current)
-      ) {
-        const a = visibleTaskIds.indexOf(taskAnchor.current),
-          b = visibleTaskIds.indexOf(id);
-        const range = visibleTaskIds.slice(Math.min(a, b), Math.max(a, b) + 1);
-        return new Set([
-          ...(modifiers.ctrlKey || modifiers.metaKey ? prior : []),
-          ...range,
-        ]);
-      }
-      taskAnchor.current = id;
-      if (modifiers.ctrlKey || modifiers.metaKey) {
-        const next = new Set(prior);
-        if (next.has(id)) next.delete(id);
-        else next.add(id);
-        return next;
-      }
-      return new Set([id]);
+      const next = new Set(prior);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
     });
   };
   const applyTaskMove = (
@@ -1299,9 +1386,51 @@ export default function App() {
       return moveTasks(next, ids, date, target, after);
     });
     setMoveMenu(false);
+    setDateTasks(null);
+    setTaskContextMenu(null);
   };
   const selectedTaskIds = () =>
     visibleTaskIds.filter((id) => taskSelection.has(id));
+  const copySelectedTasks = async (ids = selectedTaskIds()) => {
+    const state = latest.current;
+    if (!state || readOnly) return;
+    const payload = copyTasks(state, ids);
+    if (!payload.entries.length) return;
+    try {
+      if (!window.notebookDesktop)
+        throw Error("Desktop clipboard is unavailable.");
+      await window.notebookDesktop.copy({
+        html: clipboardHtml(payload),
+        text: payload.entries
+          .map((e) => "\t".repeat(e.depth) + "• " + textOf(e.bullet.html))
+          .join("\n"),
+      });
+      setTaskContextMenu(null);
+    } catch (e) {
+      setError("Could not copy selected tasks: " + (e as Error).message);
+    }
+  };
+  taskShortcuts.current = (e) => {
+    if (
+      readOnly ||
+      view.type !== "tasks" ||
+      (e.target as Element).closest(
+        ".rich-editor,input,textarea,[contenteditable=true],.page-search-panel",
+      )
+    )
+      return false;
+    if (e.key.toLowerCase() === "a") {
+      setTaskSelection(new Set(visibleTaskIds));
+      taskAnchor.current = visibleTaskIds[0] ?? null;
+      setActiveTask(null);
+      return true;
+    }
+    if (e.key.toLowerCase() === "c" && taskSelection.size) {
+      void copySelectedTasks();
+      return true;
+    }
+    return false;
+  };
   const addTask = () => {
     if (readOnly) return;
     let id = "";
@@ -1652,18 +1781,26 @@ export default function App() {
   const taskCard = (task: Task) => (
     <article
       key={task.bullet.id}
-      className={`task-card ${taskSelection.has(identity(task.bullet)) && !readOnly ? "task-card-selected" : ""}`}
-      onClick={(e) => {
+      className={`task-card ${taskSelection.has(identity(task.bullet)) && !readOnly ? "task-card-selected" : ""} ${activeTask === identity(task.bullet) && !readOnly ? "task-card-focused" : ""}`}
+      onPointerDown={(e) => {
         if (
-          (e.target as Element).closest(
-            "button,input,a,.rich-editor,[draggable]",
-          )
+          e.button === 0 &&
+          !(e.target as Element).closest(".task-selection-control")
         )
-          return;
-        if (selectingTasks || e.ctrlKey || e.metaKey || e.shiftKey) {
-          e.preventDefault();
-          selectTask(identity(task.bullet), e);
-        }
+          setActiveTask(identity(task.bullet));
+      }}
+      onFocusCapture={(e) => {
+        if (!(e.target as Element).closest(".task-selection-control"))
+          setActiveTask(identity(task.bullet));
+      }}
+      onContextMenu={(e) => {
+        if (readOnly || !taskSelection.has(identity(task.bullet))) return;
+        e.preventDefault();
+        setTaskContextMenu({
+          x: e.clientX,
+          y: e.clientY,
+          ids: selectedTaskIds(),
+        });
       }}
       data-task={task.bullet.id}
       data-task-context={identity(task.bullet)}
@@ -1688,21 +1825,28 @@ export default function App() {
       }}
     >
       <div className="task-source">
-        {selectingTasks && !readOnly && (
-          <label className="task-selection-control">
-            <input
-              type="checkbox"
-              aria-label="Select task"
-              checked={taskSelection.has(identity(task.bullet))}
-              onChange={() =>
-                selectTask(identity(task.bullet), {
-                  ctrlKey: true,
-                  shiftKey: false,
-                })
-              }
-            />
-            <span>Select</span>
-          </label>
+        {!readOnly && (
+          <button
+            type="button"
+            className="task-selection-control"
+            aria-label="Select task"
+            aria-pressed={taskSelection.has(identity(task.bullet))}
+            title="Select task; Shift-click for a range in this column"
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={(e) => {
+              e.currentTarget.focus();
+              selectTask(identity(task.bullet), e.shiftKey);
+            }}
+          >
+            {taskSelection.has(identity(task.bullet)) ? (
+              <CheckSquare size={16} />
+            ) : (
+              <Square size={16} />
+            )}
+            <span>
+              {taskSelection.has(identity(task.bullet)) ? "Selected" : "Select"}
+            </span>
+          </button>
         )}
         {!readOnly && (
           <span
@@ -1712,10 +1856,7 @@ export default function App() {
               draggedTasks.current = taskSelection.has(id)
                 ? selectedTaskIds()
                 : [id];
-              if (!taskSelection.has(id)) {
-                setTaskSelection(new Set([id]));
-                taskAnchor.current = id;
-              }
+              setActiveTask(id);
               e.dataTransfer.effectAllowed = "move";
               e.dataTransfer.setData("text/plain", id);
               e.dataTransfer.setData(
@@ -2295,21 +2436,17 @@ export default function App() {
                     <Plus size={16} />
                     Add task
                   </button>
-                  <button
-                    className="button secondary"
-                    aria-pressed={selectingTasks}
-                    onClick={() => {
-                      setSelectingTasks(!selectingTasks);
-                      clearTaskSelection();
-                    }}
-                  >
-                    Select tasks
-                  </button>
-                  {selectingTasks && (
+                  <span role="status" aria-live="polite">
+                    {taskSelection.size} selected
+                  </span>
+                  {taskSelection.size > 0 && (
                     <>
-                      <span role="status" aria-live="polite">
-                        {taskSelection.size} selected
-                      </span>
+                      <button
+                        className="button secondary"
+                        onClick={() => void copySelectedTasks()}
+                      >
+                        Copy selected
+                      </button>
                       <button
                         className="button secondary"
                         disabled={!taskSelection.size}
@@ -2524,6 +2661,31 @@ export default function App() {
           e.target.value = "";
         }}
       />
+      {taskContextMenu && (
+        <TaskContextMenu
+          x={taskContextMenu.x}
+          y={taskContextMenu.y}
+          count={taskContextMenu.ids.length}
+          onAssign={() => {
+            setDateTasks(taskContextMenu.ids);
+            setTaskContextMenu(null);
+          }}
+          onUnassign={() => applyTaskMove(taskContextMenu.ids, null)}
+          onCopy={() => void copySelectedTasks(taskContextMenu.ids)}
+          onClose={() => setTaskContextMenu(null)}
+        />
+      )}
+      {dateTasks && (
+        <TaskDateDialog
+          count={dateTasks.length}
+          initialDate={
+            allTasks.find((t) => identity(t.bullet) === dateTasks[0])?.bullet
+              .dueDate ?? null
+          }
+          onAssign={(date) => applyTaskMove(dateTasks, date)}
+          onClose={() => setDateTasks(null)}
+        />
+      )}
       {dialog && (
         <div
           className="modal-backdrop"

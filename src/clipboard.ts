@@ -9,6 +9,7 @@ import {
   uid,
   editPage,
   updateBullet,
+  tasksOf,
 } from "./model";
 import { sanitize } from "./rich";
 
@@ -60,6 +61,36 @@ export function copyBullets(
     version: 1,
     notebookId: db.notebookId,
     entries,
+  };
+}
+
+// Copy selected logical roots in display order, without copying a selected
+// descendant again when it is already included in another selected subtree.
+export function copyTasks(db: Notebook, ids: string[]): BulletClipboard {
+  const live = tasksOf(db);
+  const selected = [...new Set(ids)]
+    .map((id) => live.find((t) => identity(t.bullet) === id))
+    .filter((t) => t !== undefined);
+  const roots = selected.filter(
+    (task) =>
+      !selected.some(
+        (parent) =>
+          parent !== task &&
+          parent.information.some(
+            (i) => !i.sibling && identity(i.bullet) === identity(task.bullet),
+          ),
+      ),
+  );
+  return {
+    format: "task-notebook/bullets",
+    version: 1,
+    notebookId: db.notebookId,
+    entries: roots.flatMap((task) => {
+      const source = contentContainers(db).find((p) =>
+        p.bullets.some((b) => b.id === task.bullet.id),
+      )!;
+      return copyBullets(db, source, [task.bullet.id]).entries;
+    }),
   };
 }
 

@@ -2,6 +2,7 @@ import type { Notebook } from "./model";
 declare global {
   interface Window {
     notebookDesktop?: {
+      copy: (content: { text: string; html: string }) => Promise<void>;
       load: () => Promise<Notebook | null>;
       export: (state: Notebook) => Promise<string | null>;
       save: (state: Notebook) => Promise<void>;

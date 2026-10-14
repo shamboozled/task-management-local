@@ -35,13 +35,15 @@ async function seed(page: Page) {
   await saved(page);
 }
 const card = (page: Page, index: number) =>
-  page.locator(`[data-task="task-${index}"]`);
+  page.locator(`[data-task-context="task-${index}"]`);
 async function select(
   page: Page,
   index: number,
   modifiers: ("Control" | "Shift")[] = [],
 ) {
-  await card(page, index).click({ position: { x: 5, y: 5 }, modifiers });
+  await card(page, index)
+    .getByRole("button", { name: "Select task", exact: true })
+    .click({ modifiers });
 }
 
 // Begin the native drag before the destination scrolls into view. Real mouse
@@ -67,7 +69,9 @@ test("Add task creates and focuses a blank Unassigned task without sidebar conta
   const task = page.getByRole("textbox", { name: "Task text", exact: true });
   await expect(task).toBeFocused();
   await expect(task).toHaveText("");
-  await expect(page.locator(".task-source button")).toHaveCount(0);
+  await expect(
+    page.locator(".task-source button:not(.task-selection-control)"),
+  ).toHaveCount(0);
   await expect(page.locator(".sidebar [data-section]")).toHaveCount(0);
   await page.getByLabel("Search tasks").click();
   await page.reload();
@@ -138,12 +142,14 @@ test("full task copy into notes establishes a synchronized source link and prese
     .fill("Review revised contract");
   await page.getByRole("button", { name: "Current task list" }).click();
   await expect(page.locator(".task-card")).toHaveCount(1);
-  await expect(page.locator(".task-source button")).toHaveText(
-    "Contract notes",
-  );
+  await expect(
+    page.locator(".task-source button:not(.task-selection-control)"),
+  ).toHaveText("Contract notes");
   await expect(task).toHaveText("Review revised contract");
   await task.fill("Final contract");
-  await page.locator(".task-source button").click();
+  await page
+    .locator(".task-source button:not(.task-selection-control)")
+    .click();
   await expect(task).toHaveText("Final contract");
   page.on("dialog", (d) => {
     void d.accept();
@@ -151,35 +157,43 @@ test("full task copy into notes establishes a synchronized source link and prese
   await page
     .getByRole("button", { name: "Delete page Contract notes", exact: true })
     .click();
-  await expect(page.locator(".task-source button")).toHaveCount(0);
+  await expect(
+    page.locator(".task-source button:not(.task-selection-control)"),
+  ).toHaveCount(0);
   await expect(task).toHaveText("Final contract");
   await expect(
     page.getByRole("textbox", { name: "Information text" }),
   ).toHaveText("Check renewal terms");
 });
 
-test("Ctrl/Shift selection, keyboard checkboxes, filters, and Escape remain separate from completion", async ({
+test("only always-visible Select controls select cards; Shift ranges stay within a column", async ({
   page,
 }) => {
   await seed(page);
-  await select(page, 0, ["Control"]);
-  await select(page, 3, ["Control"]);
-  await expect(page.getByRole("status")).toHaveText("2 selected");
-  await select(page, 1, ["Shift"]);
-  await expect(page.locator(".task-card-selected")).toHaveCount(3);
   await expect(
-    card(page, 0).getByLabel("Select task", { exact: true }),
-  ).not.toBeChecked();
-  await select(page, 4, ["Control", "Shift"]);
-  await expect(page.locator(".task-card-selected")).toHaveCount(4);
-  await select(page, 2, ["Control"]);
-  await expect(page.locator(".task-card-selected")).toHaveCount(3);
+    page.getByRole("button", { name: "Select tasks", exact: true }),
+  ).toHaveCount(0);
+  await expect(
+    page.getByRole("button", { name: "Select task", exact: true }),
+  ).toHaveCount(5);
+  await card(page, 0).click({ position: { x: 5, y: 5 } });
+  await expect(page.getByRole("status")).toHaveText("0 selected");
+  await card(page, 1).click({
+    position: { x: 5, y: 5 },
+    modifiers: ["Control"],
+  });
+  await expect(page.getByRole("status")).toHaveText("0 selected");
   await select(page, 0);
-  await expect(page.locator(".task-card-selected")).toHaveCount(1);
-  const checkbox = card(page, 4).getByLabel("Select task", { exact: true });
-  await checkbox.focus();
-  await checkbox.press("Space");
-  await expect(page.locator(".task-card-selected")).toHaveCount(2);
+  await select(page, 3, ["Shift"]);
+  await expect(page.locator(".task-card-selected")).toHaveCount(4);
+  await select(page, 1);
+  await expect(
+    card(page, 1).getByRole("button", { name: "Select task", exact: true }),
+  ).toHaveAttribute("aria-pressed", "false");
+  await select(page, 4);
+  await expect(page.locator(".task-card-selected")).toHaveCount(4);
+  await page.keyboard.press("Space");
+  await expect(page.locator(".task-card-selected")).toHaveCount(3);
   expect(
     await page
       .getByLabel("Complete task", { exact: true })
@@ -199,8 +213,8 @@ test("group scheduling and Unassigned moves preserve order and undo as a single 
   page,
 }) => {
   await seed(page);
-  await select(page, 0, ["Control"]);
-  await select(page, 2, ["Control"]);
+  await select(page, 0);
+  await select(page, 2);
   await page
     .getByRole("button", { name: "Move selected", exact: true })
     .click();
@@ -245,12 +259,12 @@ test("group scheduling and Unassigned moves preserve order and undo as a single 
   ]);
 });
 
-test("dragging selected cards moves a block, handles cross-column ranges, and preserves archived snapshots", async ({
+test("dragging selected cards moves a block and within-column ranges preserve archived snapshots", async ({
   page,
 }) => {
   await seed(page);
-  await select(page, 0, ["Control"]);
-  await select(page, 2, ["Control"]);
+  await select(page, 0);
+  await select(page, 2);
   await dragGrip(page, card(page, 0).locator(".drag-handle"), card(page, 4));
   await expect(page.locator(".task-card .rich-editor")).toHaveText([
     "Beta",
@@ -271,9 +285,9 @@ test("dragging selected cards moves a block, handles cross-column ranges, and pr
   await page
     .getByRole("button", { name: "Clear selection", exact: true })
     .click();
-  await select(page, 1, ["Control"]);
+  await select(page, 1);
   await select(page, 2, ["Shift"]);
-  await expect(page.getByRole("status")).toHaveText("5 selected");
+  await expect(page.getByRole("status")).toHaveText("2 selected");
   await page.getByRole("button", { name: "New task-list page" }).click();
   await page.getByRole("dialog").getByRole("textbox").fill("Next list");
   await page.getByRole("button", { name: "Create / save" }).click();
@@ -355,4 +369,203 @@ test("standalone tasks survive real close/restart and backup export/restore", as
   } finally {
     await reopened.close();
   }
+});
+
+test("right-click calendar assigns all selected tasks and Unassign works on Priority selections", async ({
+  page,
+}) => {
+  await seed(page);
+  await select(page, 0);
+  await select(page, 2);
+  await card(page, 0)
+    .getByRole("textbox", { name: "Task text", exact: true })
+    .click({ button: "right" });
+  const menu = page.getByRole("menu", { name: "Selected task actions" });
+  await expect(menu).toBeVisible();
+  await menu.getByRole("menuitem", { name: "Assign date…" }).click();
+  const calendar = page.getByRole("dialog", {
+    name: "Assign date to selected tasks",
+  });
+  await expect(calendar.getByRole("group", { name: "Calendar" })).toBeVisible();
+  await calendar.getByLabel("Selected tasks due date").fill("2027-02-01");
+  await calendar
+    .getByRole("button", { name: "February 3, 2027", exact: true })
+    .click();
+  await expect(
+    page.locator('[data-date="2027-02-03"] .task-card .rich-editor'),
+  ).toHaveText(["Alpha 02/03/2027", "Gamma 02/03/2027"]);
+  await expect(page.getByRole("status")).toHaveText("2 selected");
+  await page.keyboard.press("Control+z");
+  await expect(page.locator("[data-date] .task-card")).toHaveCount(0);
+  await page.keyboard.press("Control+Shift+z");
+  await expect(page.locator('[data-date="2027-02-03"] .task-card')).toHaveCount(
+    2,
+  );
+  await card(page, 2).click({ button: "right", position: { x: 6, y: 6 } });
+  await menu.getByRole("menuitem", { name: "Unassign selected tasks" }).click();
+  await expect(page.locator("[data-date] .task-card")).toHaveCount(0);
+  await expect(page.locator(".task-card .rich-editor")).toHaveText([
+    "Beta",
+    "Delta",
+    "Epsilon",
+    "Alpha ",
+    "Gamma ",
+  ]);
+});
+
+test("selected tasks drag between an existing date and Unassigned; outside clicks clear green feedback", async ({
+  page,
+}) => {
+  await seed(page);
+  await page.getByLabel("Add date group").fill("2027-02-03");
+  await select(page, 0);
+  await select(page, 2);
+  await dragGrip(
+    page,
+    card(page, 0).locator(".drag-handle"),
+    page.locator('[data-date="2027-02-03"] h3'),
+  );
+  await expect(page.locator('[data-date="2027-02-03"] .task-card')).toHaveCount(
+    2,
+  );
+  await dragGrip(
+    page,
+    card(page, 2).locator(".drag-handle"),
+    page.getByRole("heading", { name: "Unassigned", exact: true }),
+  );
+  await expect(page.locator("[data-date] .task-card")).toHaveCount(0);
+  await expect(page.getByRole("status")).toHaveText("2 selected");
+  await page.getByRole("heading", { name: "Unassigned", exact: true }).click();
+  await expect(
+    page.locator(".task-card-selected,.task-card-focused"),
+  ).toHaveCount(0);
+  await dragGrip(page, card(page, 0).locator(".drag-handle"), card(page, 1));
+  await expect(page.getByRole("status")).toHaveText("0 selected");
+  await expect(card(page, 0)).toHaveClass(/task-card-focused/);
+  await page.getByRole("heading", { name: "Unassigned", exact: true }).click();
+  await expect(
+    page.locator(".task-card-selected,.task-card-focused"),
+  ).toHaveCount(0);
+});
+
+test("Shift-wheel scrolls a long task page and Shift ranges never cross columns", async ({
+  page,
+}) => {
+  await seed(page);
+  const db = (await state(page))!;
+  db.taskListBullets = Array.from({ length: 20 }, (_, n) => ({
+    ...newBullet(),
+    id: `task-${n}`,
+    kind: "task" as const,
+    html: `Task ${n}`,
+    dueDate: n >= 16 ? (n < 18 ? "2027-02-03" : "2027-02-04") : null,
+  }));
+  db.taskLists[0].taskIds = db.taskListBullets.map((b) => b.id);
+  await page.evaluate((db) => window.notebookDesktop!.save(db), db);
+  await page.reload();
+  await select(page, 0);
+  await card(page, 0).hover();
+  const before = await page.evaluate(() => window.scrollY);
+  await page.keyboard.down("Shift");
+  await page.mouse.wheel(0, 900);
+  await expect
+    .poll(() => page.evaluate(() => window.scrollY))
+    .toBeGreaterThan(before);
+  // A horizontal wheel delta generated by Shift-wheel is also interpreted vertically.
+  await page.locator("main").dispatchEvent("wheel", {
+    deltaX: 400,
+    deltaY: 0,
+    shiftKey: true,
+    bubbles: true,
+    cancelable: true,
+  });
+  await select(page, 15, ["Shift"]);
+  await page.keyboard.up("Shift");
+  await expect(page.getByRole("status")).toHaveText("16 selected");
+  await select(page, 19, ["Shift"]);
+  await expect(page.getByRole("status")).toHaveText("17 selected");
+  await select(page, 16, ["Shift"]);
+  await expect(page.getByRole("status")).toHaveText("20 selected");
+});
+
+test("RMB and Ctrl+C copy selected task trees into notes with types, ordering, and synchronization", async ({
+  page,
+  desktop,
+}) => {
+  await seed(page);
+  const db = (await state(page))!;
+  db.taskListBullets!.push({
+    ...newBullet("task-0"),
+    id: "detail",
+    html: "Attached information",
+  });
+  await page.evaluate((db) => window.notebookDesktop!.save(db), db);
+  await page.reload();
+  await select(page, 0);
+  await select(page, 2);
+  await card(page, 0).click({ button: "right", position: { x: 5, y: 5 } });
+  await page.getByRole("menuitem", { name: "Copy selected tasks" }).click();
+  await expect
+    .poll(() => desktop.evaluate(({ clipboard }) => clipboard.readText()))
+    .toBe("• Alpha\n\t• Attached information\n• Gamma");
+  await select(page, 0); // deselect Alpha
+  await select(page, 0); // select it again, leaving both selected
+  await page.keyboard.press("Control+c");
+  await expect
+    .poll(() =>
+      desktop.evaluate(async ({ clipboard }) =>
+        (await (await clipboard.read())[0].getType("text/html")).text(),
+      ),
+    )
+    .toContain("data-task-notebook");
+  await page.getByRole("button", { name: "New section", exact: true }).click();
+  await page.getByRole("dialog").getByRole("textbox").fill("Copied tasks");
+  await page.getByRole("button", { name: "Create / save" }).click();
+  await page
+    .getByRole("textbox", { name: "Information text" })
+    .press("Control+v");
+  await expect(
+    page.getByRole("textbox", { name: "Task text", exact: true }),
+  ).toHaveText(["Alpha", "Gamma"]);
+  await expect(
+    page.getByRole("textbox", { name: "Information text" }),
+  ).toHaveText("Attached information");
+  await page
+    .getByRole("textbox", { name: "Task text", exact: true })
+    .last()
+    .fill("Gamma edited in notes");
+  await page.getByRole("button", { name: "Current task list" }).click();
+  await expect(
+    card(page, 2).getByRole("textbox", { name: "Task text", exact: true }),
+  ).toHaveText("Gamma edited in notes");
+  await expect(page.locator(".task-card")).toHaveCount(5);
+});
+
+test("Ctrl+A selects visible cards outside editors and text shortcuts retain their normal behavior", async ({
+  page,
+  desktop,
+}) => {
+  await seed(page);
+  await select(page, 0);
+  await page.keyboard.press("Control+a");
+  await expect(page.getByRole("status")).toHaveText("5 selected");
+  await page.keyboard.press("Control+c");
+  await expect
+    .poll(() => desktop.evaluate(({ clipboard }) => clipboard.readText()))
+    .toBe("• Alpha\n• Beta\n• Gamma\n• Delta\n• Epsilon");
+  await card(page, 0)
+    .getByRole("textbox", { name: "Task text", exact: true })
+    .click();
+  await page.keyboard.press("Control+a");
+  expect(await page.evaluate(() => window.getSelection()?.toString())).toBe(
+    "Alpha",
+  );
+  await page.keyboard.press("Control+c");
+  await expect
+    .poll(() => desktop.evaluate(({ clipboard }) => clipboard.readText()))
+    .toBe("• Alpha");
+  await page.getByLabel("Search tasks").fill("Gamma");
+  await select(page, 2);
+  await page.keyboard.press("Control+a");
+  await expect(page.getByRole("status")).toHaveText("1 selected");
 });

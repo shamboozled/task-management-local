@@ -5,6 +5,8 @@ const {
   shell,
   dialog,
   session,
+  clipboard,
+  ClipboardItem,
 } = require("electron");
 const path = require("node:path");
 const fs = require("node:fs");
@@ -63,6 +65,21 @@ if (!app.requestSingleInstanceLock()) {
           throw Error("Unsupported hyperlink protocol.");
         await shell.openExternal(parsed.href);
       };
+      handle("notebook:copy", (value) => {
+        if (
+          !value ||
+          typeof value.text !== "string" ||
+          typeof value.html !== "string" ||
+          value.text.length + value.html.length > 100 * 1024 * 1024
+        )
+          throw Error("Invalid clipboard content.");
+        return clipboard.write([
+          new ClipboardItem({
+            "text/plain": value.text,
+            "text/html": value.html,
+          }),
+        ]);
+      });
       handle("notebook:load", () => notebook.load());
       handle("notebook:save", (value) => {
         if (
